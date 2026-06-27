@@ -46,10 +46,10 @@ _WHISPER_ALLOWED = {"small", "medium", "large-v3"}
 # Gemini transcription (cloud). Multimodal model — significantly better than
 # Whisper on out-of-distribution audio like singing. Free tier via AI Studio.
 _genai_client = None
-_GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+_GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 _LYRIC_PROVIDERS = {"gemini", "whisper"}
 _CHORD_PROVIDERS = {"hybrid", "local"}
-_GEMINI_MODELS = {"gemini-2.5-flash", "gemini-2.5-pro"}
+_GEMINI_MODELS = {"gemini-3.5-flash", "gemini-2.5-pro"}
 
 # Per-stage weights (relative time, summed → 100%). analyze() annotates each
 # stage boundary; GET /progress reflects the latest pct. Single-user local-only
@@ -620,6 +620,31 @@ def transcribe_vocals(
 # ---------------------------------------------------------------------------
 # Gemini lyric transcription (cloud)
 # ---------------------------------------------------------------------------
+
+
+_GEMINI_FAILURE_LOG = Path(__file__).parent / "logs" / "gemini-failures.log"
+
+
+def _log_gemini_failure(kind: str, exc: BaseException) -> None:
+    """Append a Gemini failure with full traceback to backend/logs/gemini-failures.log.
+
+    The terminal one-liner at the failure site is useful in the moment;
+    this file is what we read later to figure out *why* an old run fell
+    back. Best-effort — if the write itself fails we swallow it, so a
+    logging glitch never masks the original error.
+    """
+    import datetime
+    import traceback
+    try:
+        _GEMINI_FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _GEMINI_FAILURE_LOG.open("a", encoding="utf-8") as f:
+            ts = datetime.datetime.now().isoformat(timespec="seconds")
+            f.write(
+                f"\n=== {ts} {kind} {type(exc).__name__}: {exc} ===\n"
+            )
+            f.write(traceback.format_exc())
+    except Exception as log_exc:
+        print(f"[gemini-failure-log] could not write log: {log_exc}")
 
 
 def _get_genai_client():
@@ -1624,6 +1649,7 @@ def analyze(
                             f"({type(e).__name__}: {e}); "
                             f"falling back to full local template set"
                         )
+                        _log_gemini_failure("chord-id", e)
                         chord_provider_used = "local-fallback"
 
                 if lyric_fut is not None:
@@ -1636,6 +1662,7 @@ def analyze(
                             f"({type(e).__name__}: {e}); "
                             f"falling back to Whisper small"
                         )
+                        _log_gemini_failure("lyrics", e)
                         # lyrics stays None — Whisper fallback fires below
             _progress_complete("gemini")
 
@@ -1746,8 +1773,17 @@ def analyze(
             gemini_key=gemini_key,
         )
         # Stash for next time the same audio + params land. model_dump() gives
-        # a JSON-friendly dict that reconstructs cleanly.
-        _cache_put(ck, result.model_dump())
+        # a JSON-friendly dict that reconstructs cleanly. Skip when Gemini
+        # fell back — caching a fallback would short-circuit every future
+        # retry, even after Google's outage clears.
+        fell_back = (
+            chord_provider_used == "local-fallback"
+            or lyric_provider_used == "whisper-fallback"
+        )
+        if fell_back:
+            print(f"[cache] skip put (fallback path: chord={chord_provider_used}, lyric={lyric_provider_used})")
+        else:
+            _cache_put(ck, result.model_dump())
         return result
     finally:
         # Settle the bar at 100% so the frontend's final poll sees completion
