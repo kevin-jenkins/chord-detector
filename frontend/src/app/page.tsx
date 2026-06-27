@@ -25,7 +25,7 @@ export default function Home() {
   const [whisperModel, setWhisperModel] = useState<"small" | "medium" | "large-v3">("small");
   const [lyricHint, setLyricHint] = useState("");
   const [chordProvider, setChordProvider] = useState<"hybrid" | "local">("hybrid");
-  const [geminiModel, setGeminiModel] = useState<"gemini-2.5-flash" | "gemini-2.5-pro">("gemini-2.5-pro");
+  const [geminiModel, setGeminiModel] = useState<"gemini-3.5-flash" | "gemini-2.5-pro">("gemini-2.5-pro");
   const [progress, setProgress] = useState(0);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [processingTimeSec, setProcessingTimeSec] = useState<number | null>(null);
@@ -371,7 +371,7 @@ export default function Home() {
                 disabled={loading}
                 style={{ background: "var(--panel)", color: "var(--text)", border: "1px solid var(--border)", padding: "2px 6px", borderRadius: 4 }}
               >
-                <option value="gemini-2.5-flash">2.5 Flash (fast, free)</option>
+                <option value="gemini-3.5-flash">3.5 Flash (fast, free)</option>
                 <option value="gemini-2.5-pro">2.5 Pro (slower, better)</option>
               </select>
             </label>
