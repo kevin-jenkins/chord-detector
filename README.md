@@ -47,8 +47,8 @@ pip install -r requirements.txt
 
 ### GPU acceleration (optional, big win)
 
-Demucs auto-detects the best device at startup. You'll see one of these
-lines in the backend log on the first analysis after restart:
+Demucs auto-detects the best device on the first analysis after a restart.
+You'll see one of these lines in the backend log:
 
 - `Demucs device: CUDA (...)` — NVIDIA GPU on Linux/Windows. Roughly **10× faster** than CPU.
 - `Demucs device: MPS (Apple Silicon, CPU fallback enabled)` — M1/M2/M3 Mac. Roughly **5–8× faster** than CPU.
