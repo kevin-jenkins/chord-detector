@@ -33,6 +33,7 @@ from pydantic import BaseModel
 # Heavy ML deps are lazily imported inside their respective functions so the
 # rest of the app stays snappy at startup.
 _demucs_model = None    # cached across requests
+_demucs_device = None   # resolved on first stem-separation request
 
 # Whisper supports per-request model size selection ("small" / "medium" / "large-v3").
 # We keep an LRU-capped cache so users can toggle between sizes without paying
@@ -327,6 +328,46 @@ class AnalysisResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _get_demucs_device():
+    """Pick the best inference device for demucs once per process.
+
+    Order of preference:
+      1. CUDA — NVIDIA discrete GPUs on Linux/Windows. Native complex-tensor
+         support; STFT-based audio models work out of the box.
+      2. MPS — Apple Silicon (M1/M2/M3). PyTorch 2.x adds complex-tensor
+         support; we also flip on PYTORCH_ENABLE_MPS_FALLBACK so any ops the
+         Metal backend doesn't implement transparently fall back to CPU.
+      3. CPU — universal fallback. The CPU path was DirectML's grave
+         (Intel iGPU rejects complex floats), so we don't try DirectML.
+
+    Result is cached for the rest of the process lifetime so subsequent
+    requests skip the probe.
+    """
+    global _demucs_device
+    if _demucs_device is not None:
+        return _demucs_device
+    try:
+        import torch
+        if torch.cuda.is_available():
+            _demucs_device = "cuda"
+            try:
+                name = torch.cuda.get_device_name(0)
+            except Exception:
+                name = "unknown"
+            print(f"Demucs device: CUDA ({name})")
+            return _demucs_device
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+            _demucs_device = "mps"
+            print("Demucs device: MPS (Apple Silicon, CPU fallback enabled)")
+            return _demucs_device
+    except Exception as e:
+        print(f"GPU detection failed ({type(e).__name__}: {e}); using CPU")
+    _demucs_device = "cpu"
+    print("Demucs device: CPU")
+    return _demucs_device
+
+
 def run_stem_separation(
     audio_path: str, want_vocals: bool = False,
     audio_hash: Optional[str] = None,
@@ -364,19 +405,24 @@ def run_stem_separation(
             )
 
     global _demucs_model
+    import sys
     import torch
     from demucs.apply import apply_model
     from demucs.audio import AudioFile
     from demucs.pretrained import get_model
 
-    # Make sure PyTorch is using all 14 cores on a 13th-gen i9; the auto
-    # heuristic sometimes under-counts E-cores. No-op on smaller CPUs since
-    # the value clamps to whatever's available.
-    try:
-        cpu_threads = max(1, os.cpu_count() or 1)
-        torch.set_num_threads(cpu_threads)
-    except Exception:
-        pass
+    device = _get_demucs_device()
+
+    # Windows-specific: PyTorch's CPU thread auto-detection under-counts
+    # E-cores on 12th-gen+ Intel hybrid CPUs. Force the full physical count.
+    # No-op on macOS/Linux where the default works correctly, and a no-op
+    # when we're not running on CPU.
+    if sys.platform == "win32" and device == "cpu":
+        try:
+            cpu_threads = max(1, os.cpu_count() or 1)
+            torch.set_num_threads(cpu_threads)
+        except Exception:
+            pass
 
     if _demucs_model is None:
         # mdx_extra_q: quantized MDX-Net model. ~2x faster than htdemucs_ft
@@ -384,7 +430,7 @@ def run_stem_separation(
         # since Gemini does the heavy lifting on chord identification —
         # the chord matcher and Gemini are both robust to mild stem noise.
         m = get_model("mdx_extra_q")
-        m.cpu().eval()
+        m.to(device).eval()
         _demucs_model = m
 
     model = _demucs_model
@@ -399,12 +445,31 @@ def run_stem_separation(
     wav_norm = (wav - mean) / (std + 1e-8)
 
     with torch.no_grad():
-        sources = apply_model(
-            model, wav_norm[None],
-            device="cpu", progress=False,
-            shifts=0,      # disable default extra random-time-shift pass
-            overlap=0.1,   # default 0.25 → 0.1 trims redundant chunk compute
-        )[0]
+        def _run(dev):
+            return apply_model(
+                model, wav_norm[None],
+                device=dev, progress=False,
+                shifts=0,      # disable default extra random-time-shift pass
+                overlap=0.1,   # default 0.25 → 0.1 trims redundant chunk compute
+            )[0]
+
+        try:
+            sources = _run(device)
+        except RuntimeError as e:
+            # Graceful fallback if a GPU device hits an unsupported op
+            # mid-run (MPS especially can still surprise on STFT-heavy
+            # models). Permanent downgrade for the rest of this process
+            # — no per-request flapping.
+            if device == "cpu":
+                raise
+            global _demucs_device
+            print(
+                f"{device} inference failed ({type(e).__name__}: {e}); "
+                f"falling back to CPU for the rest of the process"
+            )
+            _demucs_device = "cpu"
+            model.to("cpu")
+            sources = _run("cpu")
     sources = sources * std + mean
 
     src_names = list(model.sources)
