@@ -1,0 +1,42 @@
+:root {
+  --bg: #0e0f12;
+  --panel: #16181d;
+  --border: #262a33;
+  --text: #e8eaed;
+  --muted: #8b91a0;
+  --accent: #7aa2f7;
+  --accent-bright: #a3c5ff;
+  --chord-bg: #1f2430;
+  --chord-active: #2e3b5e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+button {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 8px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

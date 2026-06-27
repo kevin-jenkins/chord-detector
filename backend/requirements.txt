@@ -1,0 +1,12 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+librosa==0.10.2
+numpy==1.26.4
+pydantic==2.9.2
+demucs==4.0.1
+# mdx_extra_q (the quantized MDX model demucs loads) needs diffq for dequantization.
+diffq>=0.2
+faster-whisper==1.0.3
+google-genai
+python-dotenv>=1.0.0
