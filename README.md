@@ -29,18 +29,32 @@ loses to Pro on heavy/melismatic indie-rock vocals by a wide margin.
 
 Requires **Python 3.11** (3.12 also fine), **Node 20+**, and **FFmpeg** on PATH.
 
-```powershell
-winget install Gyan.FFmpeg     # then restart the shell
-```
+| Platform | FFmpeg | venv activate |
+|---|---|---|
+| Windows (PowerShell) | `winget install Gyan.FFmpeg` then restart the shell | `.venv\Scripts\Activate.ps1` |
+| macOS | `brew install ffmpeg` | `source .venv/bin/activate` |
+| Debian/Ubuntu | `sudo apt install ffmpeg` | `source .venv/bin/activate` |
+| Fedora/RHEL | `sudo dnf install ffmpeg` | `source .venv/bin/activate` |
 
 ### Backend
 
-```powershell
+```bash
 cd backend
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+# activate per the table above
 pip install -r requirements.txt
 ```
+
+### GPU acceleration (optional, big win)
+
+Demucs auto-detects the best device on the first analysis after a restart.
+You'll see one of these lines in the backend log:
+
+- `Demucs device: CUDA (...)` — NVIDIA GPU on Linux/Windows. Roughly **10× faster** than CPU.
+- `Demucs device: MPS (Apple Silicon, CPU fallback enabled)` — M1/M2/M3 Mac. Roughly **5–8× faster** than CPU.
+- `Demucs device: CPU` — universal fallback.
+
+CUDA requires a matching `torch` build (`pip install torch --index-url https://download.pytorch.org/whl/cu121` after the regular install, picking the cuXXX that matches your CUDA toolkit). MPS works out of the box on Apple Silicon with the standard `torch` wheel from PyPI.
 
 First run will download:
 - demucs weights (`mdx_extra_q`, ~50 MB) to `~/.cache/torch/hub`
@@ -89,15 +103,17 @@ used for Google's model training, which the free tier does not.
 
 Two terminals.
 
-```powershell
-# Terminal 1
+```bash
+# Terminal 1 — backend
 cd backend
-.venv\Scripts\Activate.ps1
+# activate venv:
+#   Windows:    .venv\Scripts\Activate.ps1
+#   macOS/Linux: source .venv/bin/activate
 python main.py
 ```
 
-```powershell
-# Terminal 2
+```bash
+# Terminal 2 — frontend
 cd frontend
 npm run dev
 ```
