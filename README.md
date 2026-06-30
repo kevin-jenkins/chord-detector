@@ -1,6 +1,6 @@
 # Chord Detector
 
-A chord detection web app for Windows 11. Drop a song in, get back a synced
+A cross-platform chord detection web app (Windows, macOS, Linux). Drop a song in, get back a synced
 chord timeline, lyric transcription, section structure, transpose / capo
 suggestions, and exports in ChordPro or Ultimate Guitar–style tab.
 
@@ -255,8 +255,12 @@ chart and exports update in lockstep.
   re-running demucs. Wiped on backend restart.
 
 Wipe the result cache:
-```powershell
-Remove-Item C:\Dev\chord-detector\backend\.cache -Recurse -Force
+```bash
+# macOS/Linux
+rm -rf backend/.cache
+
+# Windows (PowerShell)
+Remove-Item backend\.cache -Recurse -Force
 ```
 
 ## Performance
