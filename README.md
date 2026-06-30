@@ -62,7 +62,7 @@ First run will download:
 
 ### Frontend
 
-```powershell
+```bash
 cd frontend
 npm install
 ```
@@ -265,9 +265,12 @@ Remove-Item backend\.cache -Recurse -Force
 
 ## Performance
 
-Where the time goes for a 4-minute song on a modern laptop CPU (no GPU
-acceleration — demucs uses STFT/complex tensors that DirectML doesn't
-support, and the Intel Iris Xe GPU on the dev machine has no useful path):
+Where the time goes for a 4-minute song on a modern laptop CPU, with no GPU
+acceleration. (These numbers are from the original dev machine — a Windows
+laptop whose Intel Iris Xe GPU has no useful demucs path, since demucs uses
+STFT/complex tensors that DirectML doesn't support. On a CUDA NVIDIA GPU or
+Apple Silicon MPS, demucs is substantially faster — see
+[GPU acceleration](#gpu-acceleration-optional-big-win) above.)
 
 | Stage | Time |
 |---|---|
