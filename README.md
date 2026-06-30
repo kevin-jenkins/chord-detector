@@ -1,6 +1,6 @@
 # Chord Detector
 
-A chord detection web app for Windows 11. Drop a song in, get back a synced
+A cross-platform chord detection web app (Windows, macOS, Linux). Drop a song in, get back a synced
 chord timeline, lyric transcription, section structure, transpose / capo
 suggestions, and exports in ChordPro or Ultimate Guitar–style tab.
 
@@ -62,7 +62,7 @@ First run will download:
 
 ### Frontend
 
-```powershell
+```bash
 cd frontend
 npm install
 ```
@@ -255,15 +255,22 @@ chart and exports update in lockstep.
   re-running demucs. Wiped on backend restart.
 
 Wipe the result cache:
-```powershell
-Remove-Item C:\Dev\chord-detector\backend\.cache -Recurse -Force
+```bash
+# macOS/Linux
+rm -rf backend/.cache
+
+# Windows (PowerShell)
+Remove-Item backend\.cache -Recurse -Force
 ```
 
 ## Performance
 
-Where the time goes for a 4-minute song on a modern laptop CPU (no GPU
-acceleration — demucs uses STFT/complex tensors that DirectML doesn't
-support, and the Intel Iris Xe GPU on the dev machine has no useful path):
+Where the time goes for a 4-minute song on a modern laptop CPU, with no GPU
+acceleration. (These numbers are from the original dev machine — a Windows
+laptop whose Intel Iris Xe GPU has no useful demucs path, since demucs uses
+STFT/complex tensors that DirectML doesn't support. On a CUDA NVIDIA GPU or
+Apple Silicon MPS, demucs is substantially faster — see
+[GPU acceleration](#gpu-acceleration-optional-big-win) above.)
 
 | Stage | Time |
 |---|---|
