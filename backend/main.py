@@ -37,6 +37,8 @@ import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
+from beats import beat_track
+from btc import extract_chords_btc
 from cache import _audio_hash, _cache_get, _cache_key, _cache_put
 from chords import estimate_key, extract_chords
 from gemini_chords import (
@@ -61,6 +63,11 @@ from whisper_lyrics import _WHISPER_ALLOWED, transcribe_vocals
 
 _LYRIC_PROVIDERS = {"gemini", "whisper"}
 _CHORD_PROVIDERS = {"hybrid", "local"}
+# Second-tier recognizer selection (orthogonal to _CHORD_PROVIDERS).
+# "local"   — chroma_cqt → Pearson → Viterbi (shipping default)
+# "btc"     — BTC transformer. Bypasses Gemini's chord-set constraint when active.
+_CHORD_RECOGNIZERS = {"local", "btc"}
+_CHORD_RECOGNIZER_DEFAULT = os.environ.get("CHORD_RECOGNIZER", "local")
 
 # Request-level serialization: single-user local app, so if a second /analyze
 # arrives mid-analysis we return 409 rather than letting the two trample
@@ -108,11 +115,16 @@ def analyze(
     lyric_provider: str = Form("gemini"),
     chord_provider: str = Form("hybrid"),
     gemini_model: str = Form(""),
+    chord_recognizer: str = Form(""),
 ):
     if lyric_provider not in _LYRIC_PROVIDERS:
         lyric_provider = "gemini"
     if chord_provider not in _CHORD_PROVIDERS:
         chord_provider = "hybrid"
+    if chord_recognizer not in _CHORD_RECOGNIZERS:
+        chord_recognizer = _CHORD_RECOGNIZER_DEFAULT
+    if chord_recognizer not in _CHORD_RECOGNIZERS:
+        chord_recognizer = "local"
     # Per-request override (form value > env default). Empty / invalid →
     # use the env-configured _GEMINI_MODEL.
     gemini_model_override = gemini_model if gemini_model in _GEMINI_MODELS else None
@@ -200,9 +212,8 @@ def analyze(
         _progress_complete("load")
 
         _progress_enter("beats")
-        tempo, beat_frames = librosa.beat.beat_track(y=y_full, sr=sr)
+        bpm, beat_frames = beat_track(y_full, sr, tmp_path)
         beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
-        bpm = float(np.atleast_1d(tempo)[0])
         _progress_complete("beats")
 
         vocals_audio: Optional[np.ndarray] = None
@@ -323,22 +334,38 @@ def analyze(
                         allowed_for_matcher.append(c)
 
         _progress_enter("chords")
-        try:
-            chords = extract_chords(
-                y_harm, sr, duration, tuning, vocabulary,
-                allowed_chord_labels=allowed_for_matcher,
-            )
-        except ValueError as e:
-            # The Gemini-restricted template set was too thin / all out-of-
-            # vocab. Drop the restriction and run with the full vocabulary.
-            print(
-                f"Restricted chord matching failed ({e}); "
-                f"retrying with full vocabulary"
-            )
-            chords = extract_chords(y_harm, sr, duration, tuning, vocabulary)
-            if chord_provider_used == "hybrid":
-                chord_provider_used = "local-fallback"
-            gemini_chord_set = None
+        chords = None
+        if chord_recognizer == "btc":
+            # BTC bypasses the Gemini chord-set constraint — the transformer
+            # has its own vocabulary and produces time-aligned segments
+            # natively, so we don't run them through our Viterbi.
+            try:
+                chords = extract_chords_btc(tmp_path, duration)
+                if not chords:
+                    raise ValueError("BTC returned no segments")
+            except Exception as e:
+                print(
+                    f"BTC recognizer failed ({type(e).__name__}: {e}); "
+                    f"falling back to local Pearson+Viterbi"
+                )
+                chords = None  # fall through to local path below
+        if chords is None:
+            try:
+                chords = extract_chords(
+                    y_harm, sr, duration, tuning, vocabulary,
+                    allowed_chord_labels=allowed_for_matcher,
+                )
+            except ValueError as e:
+                # The Gemini-restricted template set was too thin / all
+                # out-of-vocab. Drop the restriction and run full vocabulary.
+                print(
+                    f"Restricted chord matching failed ({e}); "
+                    f"retrying with full vocabulary"
+                )
+                chords = extract_chords(y_harm, sr, duration, tuning, vocabulary)
+                if chord_provider_used == "hybrid":
+                    chord_provider_used = "local-fallback"
+                gemini_chord_set = None
         _progress_complete("chords")
 
         # Tonic sanity check from chord-timeline signals.

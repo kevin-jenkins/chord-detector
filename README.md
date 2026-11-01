@@ -78,11 +78,12 @@ Gemini API by default. Get a free key from
 # backend/.env  (gitignored)
 GEMINI_API_KEY=AIza...your_key...
 
-# Optional model override. Default is gemini-2.5-flash.
-# Use gemini-2.5-pro for higher quality on hard vocal material;
+# Optional model override. Default is gemini-3.5-flash.
+# Use gemini-3.1-pro-preview for higher quality on hard vocal material;
 # the free tier doesn't include Pro, so you'll need a billing-enabled
-# Cloud project for Pro requests.
-# GEMINI_MODEL=gemini-2.5-pro
+# Cloud project for Pro requests. Verify the current model ids via
+# https://generativelanguage.googleapis.com/v1beta/models before shipping.
+# GEMINI_MODEL=gemini-3.1-pro-preview
 ```
 
 **Without a key**, the app still runs — both Gemini paths will silently fall
@@ -245,6 +246,22 @@ Two formats, both downloaded straight from the browser:
 
 Both honor the transpose value at the top of the page; the chord
 chart and exports update in lockstep.
+
+## Experimental: swappable recognizers
+
+Three env vars opt into alternative models for the biggest pieces of the
+pipeline. All default to the shipping implementation, so the app behaves
+exactly as before unless you flip one.
+
+| Var | Default | Alternative |
+|---|---|---|
+| `DEMUCS_MODEL`     | `mdx_extra_q` | `htdemucs_ft` — ~2× slower on CPU, noticeably cleaner vocal isolation. Right default when you have a GPU. |
+| `BEAT_TRACKER`     | `librosa`     | `beat_this` — CPJKU "Beat This!" transformer (ISMIR 2024). More accurate on syncopated material. Needs `pip install beat-this`. |
+| `CHORD_RECOGNIZER` | `local`       | `btc` — Bi-directional Transformer for Chord Recognition (170-class). Needs `pip install transformers huggingface_hub`. Bypasses the Gemini chord-set constraint when active. Also exposed as a per-request dropdown in the UI. |
+
+If an alternative fails to import or run (missing install, model-download
+failure), the pipeline silently falls back to the default. Check the
+backend log — the fallback is logged at the request site.
 
 ## Cache
 

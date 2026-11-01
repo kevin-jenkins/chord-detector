@@ -25,6 +25,10 @@ export default function Home() {
   const [whisperModel, setWhisperModel] = useState<"small" | "medium" | "large-v3">("small");
   const [lyricHint, setLyricHint] = useState("");
   const [chordProvider, setChordProvider] = useState<"hybrid" | "local">("hybrid");
+  // Second-tier recognizer. "local" uses Pearson+Viterbi (ships by default);
+  // "btc" uses the BTC transformer and bypasses the Gemini chord-set constraint.
+  // Requires: pip install transformers huggingface_hub.
+  const [chordRecognizer, setChordRecognizer] = useState<"local" | "btc">("local");
   // Model ids current as of Nov 2026. gemini-2.5-pro was deprecated 2026-10-16;
   // gemini-3.1-pro-preview is the current Pro API id. Keep in sync with
   // _GEMINI_MODELS in backend/main.py.
@@ -100,6 +104,7 @@ export default function Home() {
     provider: string,
     chordProv: string,
     geminiM: string,
+    recognizer: string,
   ) => {
     setLoading(true);
     setError(null);
@@ -120,6 +125,7 @@ export default function Home() {
       fd.append("lyric_provider", provider);
       fd.append("chord_provider", chordProv);
       fd.append("gemini_model", geminiM);
+      fd.append("chord_recognizer", recognizer);
       const res = await fetch(`${API}/analyze`, { method: "POST", body: fd });
       if (!res.ok) {
         const detail = await res.text();
@@ -139,7 +145,7 @@ export default function Home() {
     const f = e.target.files?.[0];
     if (f) {
       setFile(f);
-      analyze(f, separateStems, vocabulary, transcribeLyrics, whisperModel, lyricHint, lyricProvider, chordProvider, geminiModel);
+      analyze(f, separateStems, vocabulary, transcribeLyrics, whisperModel, lyricHint, lyricProvider, chordProvider, geminiModel, chordRecognizer);
     }
   };
 
@@ -148,7 +154,7 @@ export default function Home() {
     const f = e.dataTransfer.files?.[0];
     if (f) {
       setFile(f);
-      analyze(f, separateStems, vocabulary, transcribeLyrics, whisperModel, lyricHint, lyricProvider, chordProvider, geminiModel);
+      analyze(f, separateStems, vocabulary, transcribeLyrics, whisperModel, lyricHint, lyricProvider, chordProvider, geminiModel, chordRecognizer);
     }
   };
 
@@ -363,6 +369,18 @@ export default function Home() {
             >
               <option value="hybrid">Hybrid (Gemini + local)</option>
               <option value="local">Local only</option>
+            </select>
+          </label>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            Recognizer:
+            <select
+              value={chordRecognizer}
+              onChange={(e) => setChordRecognizer(e.target.value as typeof chordRecognizer)}
+              disabled={loading}
+              style={{ background: "var(--panel)", color: "var(--text)", border: "1px solid var(--border)", padding: "2px 6px", borderRadius: 4 }}
+            >
+              <option value="local">Pearson + Viterbi</option>
+              <option value="btc">BTC transformer (experimental)</option>
             </select>
           </label>
           {(chordProvider === "hybrid" || (transcribeLyrics && lyricProvider === "gemini")) && (

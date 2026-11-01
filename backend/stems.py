@@ -2,8 +2,13 @@
 
 Drops drums for chord recognition and keeps bass + other for the harmonic
 mix. Vocals are extracted separately for lyric transcription. First call
-downloads the model weights (~80MB) to ~/.cache/torch/hub.
+downloads the model weights to ~/.cache/torch/hub.
 
+Model is configurable via the DEMUCS_MODEL env var:
+  mdx_extra_q  (default) — quantized MDX-Net, fastest on CPU, mild quality drop
+  htdemucs_ft            — fine-tuned Hybrid Transformer Demucs, ~2x slower on
+                           CPU with noticeably better vocal isolation. The right
+                           default when you have a GPU.
 Device probe is cached for the process; MPS falls back permanently to CPU
 if a run fails, since repeated flapping is worse than the one-time cost.
 """
@@ -20,6 +25,7 @@ from cache import _stems_cache_get, _stems_cache_put
 
 _demucs_model = None    # cached across requests
 _demucs_device = None   # resolved on first stem-separation request
+_DEMUCS_MODEL_NAME = os.environ.get("DEMUCS_MODEL", "mdx_extra_q")
 
 
 def _get_demucs_device():
@@ -94,9 +100,8 @@ def run_stem_separation(
             pass
 
     if _demucs_model is None:
-        # mdx_extra_q: quantized MDX-Net model. ~2x faster than htdemucs_ft
-        # on CPU with a modest quality drop in vocal isolation.
-        m = get_model("mdx_extra_q")
+        print(f"Loading demucs model: {_DEMUCS_MODEL_NAME}")
+        m = get_model(_DEMUCS_MODEL_NAME)
         m.to(device).eval()
         _demucs_model = m
 
