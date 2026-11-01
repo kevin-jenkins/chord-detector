@@ -14,4 +14,9 @@ if (-not (Test-Path $Pythonw)) {
 }
 
 Set-Location $RepoRoot
-& $Pythonw $TrayScript
+# PowerShell doesn't wait for GUI-subsystem exes like pythonw, so a bare `&`
+# returns immediately and the task ends while the tray keeps running. Task
+# Scheduler's MultipleInstances=IgnoreNew then can't see the tray, and the
+# next Start-ScheduledTask spawns a duplicate icon. -Wait keeps the task
+# alive for the tray's lifetime.
+Start-Process -FilePath $Pythonw -ArgumentList "`"$TrayScript`"" -Wait
