@@ -9,8 +9,11 @@ chord recognition, and librosa beat_track + Krumhansl-Schmuckler for BPM/key.
 Audio never leaves the machine.
 """
 
+import gc
 import os
 import tempfile
+import threading
+import time as _time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -45,11 +48,22 @@ _WHISPER_ALLOWED = {"small", "medium", "large-v3"}
 
 # Gemini transcription (cloud). Multimodal model — significantly better than
 # Whisper on out-of-distribution audio like singing. Free tier via AI Studio.
+#
+# Model names change frequently: 2.5-pro was deprecated 2026-10-16, 3.5-flash
+# went GA 2026-05-19, and 3.1-pro-preview is the current Pro API id. Override
+# via GEMINI_MODEL env var or the per-request `gemini_model` form field, and
+# bump _GEMINI_MODELS when Google releases new ones. Verify current ids via
+# https://generativelanguage.googleapis.com/v1beta/models before shipping.
 _genai_client = None
 _GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 _LYRIC_PROVIDERS = {"gemini", "whisper"}
 _CHORD_PROVIDERS = {"hybrid", "local"}
-_GEMINI_MODELS = {"gemini-3.5-flash", "gemini-2.5-pro"}
+_GEMINI_MODELS = {"gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.1-pro-preview"}
+
+# Request-level serialization: single-user local app, so if a second /analyze
+# arrives mid-analysis we return 409 rather than letting the two trample
+# shared progress + cache state.
+_analyze_lock = threading.Lock()
 
 # Per-stage weights (relative time, summed → 100%). analyze() annotates each
 # stage boundary; GET /progress reflects the latest pct. Single-user local-only
@@ -77,6 +91,7 @@ _RESULT_CACHE: dict = {}
 _RESULT_CACHE_MAX = 32
 _RESULT_CACHE_DIR = Path(__file__).parent / ".cache" / "results"
 _RESULT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_DISK_CACHE_MAX = 500   # prune oldest-mtime entries past this on each write
 
 # Stems sub-cache keyed by sha256(audio_bytes). Stems depend only on the
 # audio itself, so flipping any param (Pro/Flash, vocabulary, hint, …)
@@ -136,17 +151,37 @@ def _cache_put(key: str, value) -> None:
         tmp.replace(_RESULT_CACHE_DIR / f"{key}.json")
     except Exception as e:
         print(f"[cache] disk write failed for {key[:12]}...: {e}")
+    _prune_disk_cache()
+
+
+def _prune_disk_cache(limit: int = _DISK_CACHE_MAX) -> None:
+    """Trim the on-disk result cache to `limit` newest-mtime entries."""
+    try:
+        entries = [(p.stat().st_mtime, p) for p in _RESULT_CACHE_DIR.glob("*.json")]
+        if len(entries) <= limit:
+            return
+        entries.sort()  # oldest first
+        for _, p in entries[: len(entries) - limit]:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    except Exception as e:
+        print(f"[cache] disk prune failed: {e}")
 
 
 def _stems_cache_get(key: str, need_vocals: bool):
-    entry = _STEMS_CACHE.pop(key, None)
+    entry = _STEMS_CACHE.get(key)
     if entry is None:
         return None
-    _STEMS_CACHE[key] = entry  # touch LRU regardless
     _, vocals, _ = entry
     if need_vocals and vocals is None:
-        # Cached entry doesn't include vocals; force a recompute.
+        # Half-populated entry: don't touch LRU, let something else take
+        # the slot when the recompute path puts a full entry back.
         return None
+    # True hit — refresh LRU position by re-inserting at the tail.
+    _STEMS_CACHE.pop(key)
+    _STEMS_CACHE[key] = entry
     return entry
 
 
@@ -511,11 +546,14 @@ def _get_whisper_model(size: str):
     _whisper_models[size] = model
     _whisper_lru.append(size)
 
-    # LRU evict if over cap. Cheap since model objects hold ~500MB+; releasing
-    # the reference lets Python free it on the next GC.
+    # LRU evict if over cap. CTranslate2 holds C-side RAM until the Python
+    # destructor runs, so drop the local reference AND force a collect —
+    # otherwise flipping small ↔ large ↔ small balloons RSS by 2–3 GB.
     while len(_whisper_lru) > _WHISPER_CACHE_MAX:
         oldest = _whisper_lru.pop(0)
-        _whisper_models.pop(oldest, None)
+        evicted = _whisper_models.pop(oldest, None)
+        del evicted
+        gc.collect()
 
     return model
 
@@ -625,6 +663,54 @@ def transcribe_vocals(
 _GEMINI_FAILURE_LOG = Path(__file__).parent / "logs" / "gemini-failures.log"
 
 
+def _gemini_status_code(exc: BaseException) -> Optional[int]:
+    """Best-effort HTTP status code extraction from a google-genai exception."""
+    for attr in ("code", "status_code", "status"):
+        v = getattr(exc, attr, None)
+        if isinstance(v, int):
+            return v
+    return None
+
+
+def _gemini_generate_with_retry(
+    client,
+    *,
+    model: str,
+    contents,
+    config,
+    max_retries: int = 3,
+    initial_delay: float = 1.0,
+):
+    """generate_content with exponential backoff on transient failures.
+
+    Retries on 429 (rate limit) and 5xx; fails fast on 4xx client errors so a
+    bad API key or malformed request doesn't eat three attempts.
+    """
+    delay = initial_delay
+    last_exc: Optional[BaseException] = None
+    for attempt in range(max_retries):
+        try:
+            return client.models.generate_content(
+                model=model, contents=contents, config=config
+            )
+        except Exception as e:  # genai raises its own exception hierarchy
+            last_exc = e
+            status = _gemini_status_code(e)
+            if status is not None and 400 <= status < 500 and status != 429:
+                raise
+            if attempt == max_retries - 1:
+                raise
+            print(
+                f"[gemini] attempt {attempt + 1}/{max_retries} failed "
+                f"({type(e).__name__}: {e}); retrying in {delay:.1f}s"
+            )
+            _time.sleep(delay)
+            delay *= 2
+    # Unreachable — we either returned or re-raised above.
+    assert last_exc is not None
+    raise last_exc
+
+
 def _log_gemini_failure(kind: str, exc: BaseException) -> None:
     """Append a Gemini failure with full traceback to backend/logs/gemini-failures.log.
 
@@ -708,11 +794,13 @@ def transcribe_with_gemini(
         f"{hint_line}\n"
     )
 
-    response = client.models.generate_content(
+    response = _gemini_generate_with_retry(
+        client,
         model=model_override if model_override in _GEMINI_MODELS else _GEMINI_MODEL,
         contents=[audio_part, prompt],
         config=genai_types.GenerateContentConfig(
             response_mime_type="application/json",
+            temperature=0.1,  # near-deterministic — same audio should return same words
         ),
     )
 
@@ -1068,11 +1156,13 @@ def identify_chords_with_gemini(
         "  pick whichever tonic the song actually resolves to.\n"
     )
 
-    response = client.models.generate_content(
+    response = _gemini_generate_with_retry(
+        client,
         model=model_override if model_override in _GEMINI_MODELS else _GEMINI_MODEL,
         contents=[audio_part, prompt],
         config=genai_types.GenerateContentConfig(
             response_mime_type="application/json",
+            temperature=0.1,  # near-deterministic — same audio should return same chord set
         ),
     )
 
@@ -1503,11 +1593,21 @@ def analyze(
     # is all blocking, so running this on the asyncio event loop would freeze
     # GET /progress until analysis finishes. FastAPI runs sync handlers in its
     # threadpool, which keeps the event loop free for the poller.
+
+    # Single-user app with shared progress state: refuse a second concurrent
+    # analysis rather than let it corrupt the first's state and progress bar.
+    if not _analyze_lock.acquire(blocking=False):
+        raise HTTPException(
+            409, "Another analysis is already running — wait for it to finish"
+        )
+
     if not file.filename:
+        _analyze_lock.release()
         raise HTTPException(400, "No filename")
 
     suffix = Path(file.filename).suffix.lower()
     if suffix not in {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"}:
+        _analyze_lock.release()
         raise HTTPException(400, f"Unsupported format: {suffix}")
 
     if transcribe_lyrics and not separate_stems:
@@ -1515,6 +1615,7 @@ def analyze(
         # is what makes transcription tolerable on songs with backing music.
         _progress["stage"] = "idle"
         _progress["pct"] = 0
+        _analyze_lock.release()
         raise HTTPException(
             400, "transcribe_lyrics requires separate_stems=true"
         )
@@ -1542,6 +1643,7 @@ def analyze(
         _progress["stage"] = "done"
         _progress["pct"] = 100
         print(f"[cache] hit ({len(body_bytes)} bytes) — returning cached result")
+        _analyze_lock.release()
         return AnalysisResult(**cached)
 
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
@@ -1794,6 +1896,7 @@ def analyze(
             os.unlink(tmp_path)
         except OSError:
             pass
+        _analyze_lock.release()
 
 
 if __name__ == "__main__":

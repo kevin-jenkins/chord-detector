@@ -20,3 +20,6 @@ backend/*.txt
 
 # AI assistant working notes (kept local, not published)
 CLAUDE.md
+
+# CodeGraph local index
+.codegraph/

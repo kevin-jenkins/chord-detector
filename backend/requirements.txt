@@ -10,3 +10,6 @@ diffq>=0.2
 faster-whisper==1.0.3
 google-genai
 python-dotenv>=1.0.0
+
+# dev — not needed to run the app, only to run tests.
+pytest>=8.0.0
