@@ -202,6 +202,11 @@ _BEAT_SELF_BONUS = 0.1
 # material turned out to be passing notes (bass or melody over a held chord),
 # not chords; a 2-beat floor makes the matcher judge those beats together.
 _MIN_CHORD_BEATS = 2
+# Pearson bonus for chords Gemini actually reported, over safety-net chords
+# main.py adds (parallel major/minor, diatonic). Power chords carry no third,
+# so A vs Am scored within ±0.05 on real material and the net's Am won by
+# noise; this makes added chords need a clear margin to win.
+_PREFERRED_CHORD_BONUS = 0.04
 
 
 def _path_to_labels(path: np.ndarray, labels_for_state: List[str]) -> List[str]:
@@ -215,8 +220,12 @@ def _viterbi_labels(
     labels_for_state: List[str],
     self_bonus: float,
     min_len: int = 1,
+    preferred: frozenset = frozenset(),
 ) -> List[str]:
     sims = template_z @ _center_and_normalize(chroma, axis=0)  # (n_templates, n_cols)
+    if preferred:
+        bonus = np.array([_PREFERRED_CHORD_BONUS if l in preferred else 0.0 for l in labels_for_state])
+        sims = sims + bonus[:, None]
     emission = np.vstack([sims, np.full((1, sims.shape[1]), _N_FLOOR)])
     if min_len > 1:
         path = _viterbi_min_duration(emission, switch_penalty=self_bonus, min_len=min_len)
@@ -239,6 +248,7 @@ def _beat_sync_segments(
     beat_times: Sequence[float],
     template_z: np.ndarray,
     labels_for_state: List[str],
+    preferred: frozenset = frozenset(),
 ) -> List[tuple]:
     """One chord per beat: median chroma within each beat, Viterbi over beats."""
     chroma = _chroma(y_harm, sr, tuning, _BEAT_CHROMA_HOP)
@@ -249,7 +259,8 @@ def _beat_sync_segments(
         [0.0], librosa.frames_to_time(frames, sr=sr, hop_length=_BEAT_CHROMA_HOP), [duration]
     ])
     labels = _viterbi_labels(
-        beat_chroma, template_z, labels_for_state, _BEAT_SELF_BONUS, min_len=_MIN_CHORD_BEATS
+        beat_chroma, template_z, labels_for_state, _BEAT_SELF_BONUS,
+        min_len=_MIN_CHORD_BEATS, preferred=preferred,
     )
 
     segs: List[tuple] = []
@@ -271,13 +282,14 @@ def _frame_segments(
     duration: float,
     template_z: np.ndarray,
     labels_for_state: List[str],
+    preferred: frozenset = frozenset(),
 ) -> List[tuple]:
     """Frame-level fallback for audio without a usable beat track."""
     chroma = median_filter(_chroma(y_harm, sr, tuning, _CHROMA_HOP), size=(1, 5))  # ~465ms smoothing
 
     # 0.5 ≈ "a competing chord needs to score 0.5 higher in Pearson r to
     # overcome the cost of switching."
-    labels = _viterbi_labels(chroma, template_z, labels_for_state, self_bonus=0.5)
+    labels = _viterbi_labels(chroma, template_z, labels_for_state, self_bonus=0.5, preferred=preferred)
 
     frame_times = librosa.frames_to_time(
         np.arange(len(labels)), sr=sr, hop_length=_CHROMA_HOP
@@ -316,15 +328,19 @@ def extract_chords(
     vocabulary: str = "triads",
     allowed_chord_labels: Optional[List[str]] = None,
     beat_times: Optional[Sequence[float]] = None,
+    preferred_chord_labels: Optional[List[str]] = None,
 ) -> List[ChordSegment]:
     """Chord recognition — see module docstring for pipeline rationale.
 
     When `allowed_chord_labels` is non-empty, templates are restricted to
     those chords (hybrid mode — Gemini identifies the chord set, we do the
     timing). Raises ValueError if fewer than 2 labels survive validation.
-    With at least _MIN_BEATS_FOR_SYNC `beat_times` (seconds), matching is
-    beat-synchronous; otherwise it falls back to the frame-level path.
+    `preferred_chord_labels` (Gemini's own chords) get a small score bonus
+    over the other allowed chords. With at least _MIN_BEATS_FOR_SYNC
+    `beat_times` (seconds), matching is beat-synchronous; otherwise it falls
+    back to the frame-level path.
     """
+    preferred = frozenset(preferred_chord_labels or ())
     if allowed_chord_labels:
         labels_for_state, template_z = _custom_templates_from_labels(allowed_chord_labels)
     else:
@@ -334,9 +350,11 @@ def extract_chords(
 
     if beat_times is not None and len(beat_times) >= _MIN_BEATS_FOR_SYNC:
         segs = _beat_sync_segments(
-            y_harm, sr, tuning, duration, beat_times, template_z, labels_for_state
+            y_harm, sr, tuning, duration, beat_times, template_z, labels_for_state, preferred
         )
     else:
-        segs = _frame_segments(y_harm, sr, tuning, duration, template_z, labels_for_state)
+        segs = _frame_segments(
+            y_harm, sr, tuning, duration, template_z, labels_for_state, preferred
+        )
 
     return [ChordSegment(start=s, end=e, label=l) for s, e, l in segs]

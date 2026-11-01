@@ -52,19 +52,24 @@ class TestSanitizeChordLabel:
 
 class TestDiatonicChords:
     def test_d_major(self):
-        assert _diatonic_chords("D major") == ["D", "Em", "F#m", "G", "A", "Bm"]
+        assert _diatonic_chords("D major") == ["D", "Em", "G", "A", "Bm"]
 
     def test_e_minor(self):
-        assert _diatonic_chords("E minor") == ["Em", "G", "Am", "Bm", "C", "D"]
+        assert _diatonic_chords("E minor") == ["Em", "G", "Am", "C", "D"]
 
     def test_c_major(self):
-        assert _diatonic_chords("C major") == ["C", "Dm", "Em", "F", "G", "Am"]
+        assert _diatonic_chords("C major") == ["C", "Dm", "F", "G", "Am"]
+
+    def test_relative_keys_give_same_set(self):
+        # Gemini flips between relative keys; the safety net must not change.
+        assert set(_diatonic_chords("E major")) == set(_diatonic_chords("C# minor"))
+        assert "G#m" not in _diatonic_chords("E major")
 
     def test_flat_root_normalizes(self):
         # Bb major → A# major in internal shorthand
         chords = _diatonic_chords("Bb major")
         assert chords[0] == "A#"
-        assert len(chords) == 6
+        assert len(chords) == 5
 
     @pytest.mark.parametrize("bad", ["", "nonsense", "D", "D dorian", "Hm"])
     def test_bad_input_returns_empty(self, bad):

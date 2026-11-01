@@ -103,6 +103,21 @@ class TestViterbiMinDuration:
         assert _viterbi_min_duration(em, 0.0, 2).tolist() == [0] * 9
 
 
+def test_preferred_chord_wins_power_chord_ambiguity():
+    # A5 power chord (A + E, no third) matches A and Am equally. The chord
+    # Gemini reported should win; with no preference, either could.
+    t = np.arange(int(SR * 4.0)) / SR
+    y = sum(np.sin(2 * np.pi * f * t) + 0.3 * np.sin(4 * np.pi * f * t) for f in [110.0, 164.81, 220.0, 329.63])
+    y = (y / (np.abs(y).max() * 1.1)).astype(np.float32)
+    beats = np.arange(0.5, 4.0, 0.5)
+    for preferred, expect in ((["A"], "A"), (["Am"], "Am")):
+        segs = extract_chords(
+            y, SR, 4.0, 0.0, allowed_chord_labels=["A", "Am", "D", "E"],
+            beat_times=beats, preferred_chord_labels=preferred,
+        )
+        assert {s.label for s in segs if s.label != "N"} == {expect}
+
+
 def test_falls_back_without_enough_beats():
     prog = [("D", 2.0), ("A", 2.0), ("Em", 2.0), ("G", 2.0)]
     y = _render(prog)

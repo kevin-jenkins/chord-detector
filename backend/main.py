@@ -72,8 +72,8 @@ _CHORD_RECOGNIZER_DEFAULT = os.environ.get("CHORD_RECOGNIZER", "local")
 # Part of the result-cache key. Bump whenever the pipeline would produce a
 # different result for the same audio + form params, or old cached results
 # keep being served. 2 = beat-synchronous chord matching; 3 = 2-beat minimum
-# chord length.
-_PIPELINE_VERSION = 3
+# chord length; 4 = prefer Gemini's chords, no iii in the diatonic net.
+_PIPELINE_VERSION = 4
 
 # Request-level serialization: single-user local app, so if a second /analyze
 # arrives mid-analysis we return 409 rather than letting the two trample
@@ -367,6 +367,7 @@ def analyze(
                         y_harm, sr, duration, tuning, vocabulary,
                         allowed_chord_labels=allowed_for_matcher,
                         beat_times=beat_times,
+                        preferred_chord_labels=gemini_chord_set,
                     )
                 except ValueError as e:
                     # The Gemini-restricted template set was too thin / all

@@ -127,13 +127,18 @@ def _infer_better_key(
 
 
 def _diatonic_chords(key: str) -> List[str]:
-    """Return the 6 most-common diatonic chords for a major or minor key
-    (skipping the seldom-used vii° / ii° as they're rarely the actual chord
-    being played in pop / rock).
+    """Return the 5 most-common diatonic chords for a major or minor key,
+    used as a safety net for chords Gemini missed.
+
+    Skips vii° / ii° (rarely the actual chord in pop / rock) and the major
+    key's iii, which is the same chord as the relative minor's v. That triad
+    is a subset of two common voicings, I maj7 and vi add9/m9 (G#m ⊂ Emaj7
+    and C#m9 in E major), so offering it lets those voicings be misread as a
+    chord nobody plays. Gemini can still report it directly.
 
     Examples:
-      "D major" → ["D", "Em", "F#m", "G", "A", "Bm"]
-      "E minor" → ["Em", "G", "Am", "Bm", "C", "D"]
+      "D major" → ["D", "Em", "G", "A", "Bm"]
+      "E minor" → ["Em", "G", "Am", "C", "D"]
     """
     parts = (key or "").strip().split()
     if len(parts) != 2:
@@ -144,11 +149,11 @@ def _diatonic_chords(key: str) -> List[str]:
         return []
     root_idx = PITCH_NAMES.index(root)
     if mode == "major":
-        intervals = [0, 2, 4, 5, 7, 9]
-        qualities = ["", "m", "m", "", "", "m"]
+        intervals = [0, 2, 5, 7, 9]       # I ii IV V vi
+        qualities = ["", "m", "", "", "m"]
     elif mode == "minor":
-        intervals = [0, 3, 5, 7, 8, 10]
-        qualities = ["m", "", "m", "m", "", ""]
+        intervals = [0, 3, 5, 8, 10]      # i III iv VI VII
+        qualities = ["m", "", "m", "", ""]
     else:
         return []
     return [f"{PITCH_NAMES[(root_idx + i) % 12]}{q}" for i, q in zip(intervals, qualities)]
