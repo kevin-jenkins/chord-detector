@@ -435,4 +435,6 @@ def analyze(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # 8010, not 8000: other local dev servers commonly squat on 8000. Keep in
+    # sync with API in frontend/src/app/page.tsx and BACKEND_URL in tray/tray_app.py.
+    uvicorn.run(app, host="127.0.0.1", port=8010)

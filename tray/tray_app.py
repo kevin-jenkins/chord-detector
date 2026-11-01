@@ -23,7 +23,7 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 import pystray
 
-BACKEND_URL = "http://127.0.0.1:8000"
+BACKEND_URL = "http://127.0.0.1:8010"  # must match the port in backend/main.py
 FRONTEND_URL = "http://localhost:3000"
 HEALTH_POLL_SECONDS = 5
 HEALTH_TIMEOUT = 2

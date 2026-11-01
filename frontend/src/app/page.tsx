@@ -8,7 +8,8 @@ import { transposeKey } from "@/components/chord";
 import { exportChordPro, downloadText } from "@/components/export";
 import { exportTab } from "@/components/tabExport";
 
-const API = "http://127.0.0.1:8000";
+// Must match the port in backend/main.py.
+const API = "http://127.0.0.1:8010";
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);

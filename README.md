@@ -14,7 +14,7 @@ loses to Pro on heavy/melismatic indie-rock vocals by a wide margin.
 
 | Layer | Choice |
 |---|---|
-| Backend | FastAPI on `127.0.0.1:8000` |
+| Backend | FastAPI on `127.0.0.1:8010` |
 | Stem separation | demucs `mdx_extra_q` (quantized MDX-Net, CPU) |
 | Beat / BPM | librosa `beat_track` |
 | Key estimate | Krumhansl-Schmuckler chroma profile + timeline-tonic correction |
