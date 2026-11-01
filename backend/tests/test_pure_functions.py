@@ -10,14 +10,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from main import (
-    ChordSegment,
-    _custom_templates_from_labels,
+from chords import _custom_templates_from_labels, _viterbi
+from gemini_chords import (
     _diatonic_chords,
     _infer_better_key,
     _sanitize_chord_label,
-    _viterbi,
 )
+from models import ChordSegment
 
 
 # ---- _sanitize_chord_label ------------------------------------------------
