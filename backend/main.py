@@ -59,7 +59,7 @@ from progress import (
 from sections import detect_sections
 from stems import run_stem_separation
 from templates import PITCH_NAMES
-from whisper_lyrics import _WHISPER_ALLOWED, transcribe_vocals
+from whisper_lyrics import transcribe_vocals
 
 _LYRIC_PROVIDERS = {"gemini", "whisper"}
 _CHORD_PROVIDERS = {"hybrid", "local"}
@@ -135,302 +135,301 @@ def analyze(
 
     # Single-user app with shared progress state: refuse a second concurrent
     # analysis rather than let it corrupt the first's state and progress bar.
+    # Acquired OUTSIDE the try below so a 409 doesn't try to release what we
+    # don't hold.
     if not _analyze_lock.acquire(blocking=False):
         raise HTTPException(
             409, "Another analysis is already running — wait for it to finish"
         )
 
-    if not file.filename:
-        _analyze_lock.release()
-        raise HTTPException(400, "No filename")
-
-    suffix = Path(file.filename).suffix.lower()
-    if suffix not in {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"}:
-        _analyze_lock.release()
-        raise HTTPException(400, f"Unsupported format: {suffix}")
-
-    if transcribe_lyrics and not separate_stems:
-        # Whisper on a full mix produces garbage; the isolated vocals stem
-        # is what makes transcription tolerable on songs with backing music.
-        _progress["stage"] = "idle"
-        _progress["pct"] = 0
-        _analyze_lock.release()
-        raise HTTPException(
-            400, "transcribe_lyrics requires separate_stems=true"
-        )
-
-    # Read the uploaded bytes once so we can compute a cache key before
-    # spending any compute. Sync read because we're a sync handler.
-    body_bytes = file.file.read()
-
-    # Cache lookup. Same audio + same params → instant return.
-    ck = _cache_key(
-        body_bytes,
-        separate_stems=separate_stems,
-        vocabulary=vocabulary,
-        transcribe_lyrics=transcribe_lyrics,
-        whisper_model=whisper_model,
-        lyric_hint=lyric_hint,
-        lyric_provider=lyric_provider,
-        chord_provider=chord_provider,
-        gemini_model=gemini_model,
-    )
-    cached = _cache_get(ck)
-    if cached is not None:
-        _progress["stage"] = "done"
-        _progress["pct"] = 100
-        print(f"[cache] hit ({len(body_bytes)} bytes) — returning cached result")
-        _analyze_lock.release()
-        return AnalysisResult(**cached)
-
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(body_bytes)
-        tmp_path = tmp.name
-
-    # Declare which stages will run so the progress bar weights are right.
-    # The "gemini" stage covers the parallel chord_id + lyric calls.
-    # "lyrics_whisper" is added up front only when Whisper is the explicit
-    # provider; the fallback path (Gemini failed → Whisper) adds it
-    # dynamically via _progress_extend.
-    want_chord_gemini = chord_provider == "hybrid"
-    want_lyric_gemini = transcribe_lyrics and lyric_provider == "gemini"
-    stages = ["load", "beats"]
-    stages.append("stems" if separate_stems else "hpss")
-    if want_chord_gemini or want_lyric_gemini:
-        stages.append("gemini")
-    stages += ["tuning_key", "chords", "sections"]
-    if transcribe_lyrics and not want_lyric_gemini:
-        stages.append("lyrics_whisper")
-    _progress_begin(stages)
-
+    tmp_path: Optional[str] = None
     try:
-        _progress_enter("load")
-        # Always load the full mix at 22050 for beat tracking — beats are
-        # easier to find with drums in the signal.
-        y_full, sr = librosa.load(tmp_path, sr=22050, mono=True)
-        duration = float(librosa.get_duration(y=y_full, sr=sr))
-        _progress_complete("load")
+        if not file.filename:
+            raise HTTPException(400, "No filename")
 
-        _progress_enter("beats")
-        bpm, beat_frames = beat_track(y_full, sr, tmp_path)
-        beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
-        _progress_complete("beats")
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"}:
+            raise HTTPException(400, f"Unsupported format: {suffix}")
 
-        vocals_audio: Optional[np.ndarray] = None
-        vocals_sr: Optional[int] = None
-
-        if separate_stems:
-            _progress_enter("stems")
-            # Demucs: drop drums, keep bass + other for chord recognition.
-            # If lyrics are requested, also pull out the isolated vocals stem.
-            y_sep, vocals_audio, sep_sr = run_stem_separation(
-                tmp_path, want_vocals=transcribe_lyrics,
-                audio_hash=_audio_hash(body_bytes),
+        if transcribe_lyrics and not separate_stems:
+            # Whisper on a full mix produces garbage; the isolated vocals stem
+            # is what makes transcription tolerable on songs with backing music.
+            raise HTTPException(
+                400, "transcribe_lyrics requires separate_stems=true"
             )
-            if sep_sr != sr:
-                y_sep = librosa.resample(y_sep, orig_sr=sep_sr, target_sr=sr)
-            y_harm = y_sep
-            vocals_sr = sep_sr
-            _progress_complete("stems")
-        else:
-            _progress_enter("hpss")
-            # Fallback: HPSS as a poor-man's stem separation. Removes
-            # transient/percussive content but leaves vocals + harmonics intact.
-            y_harm, _ = librosa.effects.hpss(y_full, margin=3.0)
-            _progress_complete("hpss")
 
-        # Parallel Gemini block — chord_id and lyric transcription are both
-        # independent network-bound calls; running them concurrently saves
-        # the wall time of the shorter of the two.
-        gemini_chord_set: Optional[List[str]] = None
-        gemini_key: Optional[str] = None
-        chord_provider_used: str = "local"
-        lyrics: Optional[List[LyricWord]] = None
-        lyric_provider_used: Optional[str] = None
-        run_lyric_gemini = (
-            want_lyric_gemini
-            and vocals_audio is not None
-            and vocals_sr is not None
+        # Read the uploaded bytes once so we can compute a cache key before
+        # spending any compute. Sync read because we're a sync handler.
+        body_bytes = file.file.read()
+
+        # Cache lookup. Same audio + same params → instant return.
+        ck = _cache_key(
+            body_bytes,
+            separate_stems=separate_stems,
+            vocabulary=vocabulary,
+            transcribe_lyrics=transcribe_lyrics,
+            whisper_model=whisper_model,
+            lyric_hint=lyric_hint,
+            lyric_provider=lyric_provider,
+            chord_provider=chord_provider,
+            gemini_model=gemini_model,
+            chord_recognizer=chord_recognizer,
         )
+        cached = _cache_get(ck)
+        if cached is not None:
+            print(f"[cache] hit ({len(body_bytes)} bytes) — returning cached result")
+            return AnalysisResult(**cached)
 
-        if want_chord_gemini or run_lyric_gemini:
-            _progress_enter("gemini")
-            with ThreadPoolExecutor(max_workers=2) as ex:
-                chord_fut = (
-                    ex.submit(
-                        identify_chords_with_gemini,
-                        y_harm, sr, gemini_model_override,
-                    )
-                    if want_chord_gemini
-                    else None
-                )
-                lyric_fut = (
-                    ex.submit(
-                        transcribe_with_gemini,
-                        vocals_audio, vocals_sr,
-                        lyric_hint, gemini_model_override,
-                    )
-                    if run_lyric_gemini
-                    else None
-                )
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(body_bytes)
+            tmp_path = tmp.name
 
-                if chord_fut is not None:
-                    try:
-                        info = chord_fut.result()
-                        gemini_chord_set = info["chords"]
-                        gemini_key = info.get("key")
-                        chord_provider_used = "hybrid"
-                    except Exception as e:
-                        print(
-                            f"Gemini chord identification failed "
-                            f"({type(e).__name__}: {e}); "
-                            f"falling back to full local template set"
-                        )
-                        _log_gemini_failure("chord-id", e)
-                        chord_provider_used = "local-fallback"
+        # Declare which stages will run so the progress bar weights are right.
+        # The "gemini" stage covers the parallel chord_id + lyric calls.
+        # "lyrics_whisper" is added up front only when Whisper is the explicit
+        # provider; the fallback path (Gemini failed → Whisper) adds it
+        # dynamically via _progress_extend.
+        want_chord_gemini = chord_provider == "hybrid"
+        want_lyric_gemini = transcribe_lyrics and lyric_provider == "gemini"
+        stages = ["load", "beats"]
+        stages.append("stems" if separate_stems else "hpss")
+        if want_chord_gemini or want_lyric_gemini:
+            stages.append("gemini")
+        stages += ["tuning_key", "chords", "sections"]
+        if transcribe_lyrics and not want_lyric_gemini:
+            stages.append("lyrics_whisper")
+        _progress_begin(stages)
 
-                if lyric_fut is not None:
-                    try:
-                        lyrics = lyric_fut.result()
-                        lyric_provider_used = "gemini"
-                    except Exception as e:
-                        print(
-                            f"Gemini transcription failed "
-                            f"({type(e).__name__}: {e}); "
-                            f"falling back to Whisper small"
-                        )
-                        _log_gemini_failure("lyrics", e)
-                        # lyrics stays None — Whisper fallback fires below
-            _progress_complete("gemini")
-
-        _progress_enter("tuning_key")
-        # Tuning offset (in fractions of a semitone). Without this, chroma bins
-        # smear into neighbours when the band is even slightly flat.
-        tuning = float(librosa.estimate_tuning(y=y_harm, sr=sr))
-        ks_key = estimate_key(y_harm, sr, tuning)
-        _progress_complete("tuning_key")
-
-        # Gemini wins on key when it returned one; otherwise KS.
-        key = gemini_key or ks_key
-
-        # Augment Gemini's chord set with two safety nets:
-        #   (1) Parallel major/minor of every Gemini chord (D ↔ Dm).
-        #   (2) Diatonic chords of Gemini's key, when it returned one.
-        # The UI still shows the original gemini_chord_set so the user sees
-        # exactly what Gemini reported.
-        allowed_for_matcher: Optional[List[str]] = None
-        if gemini_chord_set:
-            allowed_for_matcher = list(gemini_chord_set)
-            for c in list(allowed_for_matcher):
-                if c in PITCH_NAMES and f"{c}m" not in allowed_for_matcher:
-                    allowed_for_matcher.append(f"{c}m")
-                elif c.endswith("m") and not c.endswith(("dim", "aug")):
-                    root = c[:-1]
-                    if root in PITCH_NAMES and root not in allowed_for_matcher:
-                        allowed_for_matcher.append(root)
-            if gemini_key:
-                for c in _diatonic_chords(gemini_key):
-                    if c not in allowed_for_matcher:
-                        allowed_for_matcher.append(c)
-
-        _progress_enter("chords")
-        chords = None
-        if chord_recognizer == "btc":
-            # BTC bypasses the Gemini chord-set constraint — the transformer
-            # has its own vocabulary and produces time-aligned segments
-            # natively, so we don't run them through our Viterbi.
-            try:
-                chords = extract_chords_btc(tmp_path, duration)
-                if not chords:
-                    raise ValueError("BTC returned no segments")
-            except Exception as e:
-                print(
-                    f"BTC recognizer failed ({type(e).__name__}: {e}); "
-                    f"falling back to local Pearson+Viterbi"
-                )
-                chords = None  # fall through to local path below
-        if chords is None:
-            try:
-                chords = extract_chords(
-                    y_harm, sr, duration, tuning, vocabulary,
-                    allowed_chord_labels=allowed_for_matcher,
-                )
-            except ValueError as e:
-                # The Gemini-restricted template set was too thin / all
-                # out-of-vocab. Drop the restriction and run full vocabulary.
-                print(
-                    f"Restricted chord matching failed ({e}); "
-                    f"retrying with full vocabulary"
-                )
-                chords = extract_chords(y_harm, sr, duration, tuning, vocabulary)
-                if chord_provider_used == "hybrid":
-                    chord_provider_used = "local-fallback"
-                gemini_chord_set = None
-        _progress_complete("chords")
-
-        # Tonic sanity check from chord-timeline signals.
-        key, _key_was = _infer_better_key(key, chords)
-
-        _progress_enter("sections")
-        sections = detect_sections(y_harm, sr, duration, beat_frames)
-        _progress_complete("sections")
-
-        # Whisper path: fires either as the primary provider or as the
-        # fallback when Gemini lyric transcription failed above.
-        if (
-            transcribe_lyrics
-            and vocals_audio is not None
-            and vocals_sr is not None
-            and lyrics is None
-        ):
-            if want_lyric_gemini:
-                _progress_extend(["lyrics_whisper"])
-            _progress_enter("lyrics_whisper")
-            lyrics = transcribe_vocals(
-                vocals_audio,
-                vocals_sr,
-                model_size="small" if want_lyric_gemini else whisper_model,
-                initial_prompt=lyric_hint,
-            )
-            lyric_provider_used = (
-                "whisper-fallback" if want_lyric_gemini else "whisper"
-            )
-            _progress_complete("lyrics_whisper")
-
-        result = AnalysisResult(
-            duration=duration,
-            bpm=bpm,
-            key=key,
-            beats=beat_times,
-            chords=chords,
-            lyrics=lyrics,
-            sections=sections if sections else None,
-            lyric_provider_used=lyric_provider_used,
-            chord_provider_used=chord_provider_used,
-            gemini_chord_set=gemini_chord_set,
-            gemini_key=gemini_key,
-        )
-        # Stash for next time. Skip when Gemini fell back — caching a fallback
-        # would short-circuit every future retry even after Google's outage
-        # clears.
-        fell_back = (
-            chord_provider_used == "local-fallback"
-            or lyric_provider_used == "whisper-fallback"
-        )
-        if fell_back:
-            print(f"[cache] skip put (fallback path: chord={chord_provider_used}, lyric={lyric_provider_used})")
-        else:
-            _cache_put(ck, result.model_dump())
-        return result
-    finally:
-        # Settle the bar at 100% so the frontend's final poll sees completion
-        # before it stops polling.
-        _progress["stage"] = "done"
-        _progress["pct"] = 100
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+            _progress_enter("load")
+            # Always load the full mix at 22050 for beat tracking — beats are
+            # easier to find with drums in the signal.
+            y_full, sr = librosa.load(tmp_path, sr=22050, mono=True)
+            duration = float(librosa.get_duration(y=y_full, sr=sr))
+            _progress_complete("load")
+
+            _progress_enter("beats")
+            bpm, beat_frames = beat_track(y_full, sr, tmp_path)
+            beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
+            _progress_complete("beats")
+
+            vocals_audio: Optional[np.ndarray] = None
+            vocals_sr: Optional[int] = None
+
+            if separate_stems:
+                _progress_enter("stems")
+                # Demucs: drop drums, keep bass + other for chord recognition.
+                # If lyrics are requested, also pull out the isolated vocals stem.
+                y_sep, vocals_audio, sep_sr = run_stem_separation(
+                    tmp_path, want_vocals=transcribe_lyrics,
+                    audio_hash=_audio_hash(body_bytes),
+                )
+                if sep_sr != sr:
+                    y_sep = librosa.resample(y_sep, orig_sr=sep_sr, target_sr=sr)
+                y_harm = y_sep
+                vocals_sr = sep_sr
+                _progress_complete("stems")
+            else:
+                _progress_enter("hpss")
+                # Fallback: HPSS as a poor-man's stem separation. Removes
+                # transient/percussive content but leaves vocals + harmonics intact.
+                y_harm, _ = librosa.effects.hpss(y_full, margin=3.0)
+                _progress_complete("hpss")
+
+            # Parallel Gemini block — chord_id and lyric transcription are both
+            # independent network-bound calls; running them concurrently saves
+            # the wall time of the shorter of the two.
+            gemini_chord_set: Optional[List[str]] = None
+            gemini_key: Optional[str] = None
+            chord_provider_used: str = "local"
+            lyrics: Optional[List[LyricWord]] = None
+            lyric_provider_used: Optional[str] = None
+            run_lyric_gemini = (
+                want_lyric_gemini
+                and vocals_audio is not None
+                and vocals_sr is not None
+            )
+
+            if want_chord_gemini or run_lyric_gemini:
+                _progress_enter("gemini")
+                with ThreadPoolExecutor(max_workers=2) as ex:
+                    chord_fut = (
+                        ex.submit(
+                            identify_chords_with_gemini,
+                            y_harm, sr, gemini_model_override,
+                        )
+                        if want_chord_gemini
+                        else None
+                    )
+                    lyric_fut = (
+                        ex.submit(
+                            transcribe_with_gemini,
+                            vocals_audio, vocals_sr,
+                            lyric_hint, gemini_model_override,
+                        )
+                        if run_lyric_gemini
+                        else None
+                    )
+
+                    if chord_fut is not None:
+                        try:
+                            info = chord_fut.result()
+                            gemini_chord_set = info["chords"]
+                            gemini_key = info.get("key")
+                            chord_provider_used = "hybrid"
+                        except Exception as e:
+                            print(
+                                f"Gemini chord identification failed "
+                                f"({type(e).__name__}: {e}); "
+                                f"falling back to full local template set"
+                            )
+                            _log_gemini_failure("chord-id", e)
+                            chord_provider_used = "local-fallback"
+
+                    if lyric_fut is not None:
+                        try:
+                            lyrics = lyric_fut.result()
+                            lyric_provider_used = "gemini"
+                        except Exception as e:
+                            print(
+                                f"Gemini transcription failed "
+                                f"({type(e).__name__}: {e}); "
+                                f"falling back to Whisper small"
+                            )
+                            _log_gemini_failure("lyrics", e)
+                            # lyrics stays None — Whisper fallback fires below
+                _progress_complete("gemini")
+
+            _progress_enter("tuning_key")
+            # Tuning offset (in fractions of a semitone). Without this, chroma bins
+            # smear into neighbours when the band is even slightly flat.
+            tuning = float(librosa.estimate_tuning(y=y_harm, sr=sr))
+            ks_key = estimate_key(y_harm, sr, tuning)
+            _progress_complete("tuning_key")
+
+            # Gemini wins on key when it returned one; otherwise KS.
+            key = gemini_key or ks_key
+
+            # Augment Gemini's chord set with two safety nets:
+            #   (1) Parallel major/minor of every Gemini chord (D ↔ Dm).
+            #   (2) Diatonic chords of Gemini's key, when it returned one.
+            # The UI still shows the original gemini_chord_set so the user sees
+            # exactly what Gemini reported.
+            allowed_for_matcher: Optional[List[str]] = None
+            if gemini_chord_set:
+                allowed_for_matcher = list(gemini_chord_set)
+                for c in list(allowed_for_matcher):
+                    if c in PITCH_NAMES and f"{c}m" not in allowed_for_matcher:
+                        allowed_for_matcher.append(f"{c}m")
+                    elif c.endswith("m") and not c.endswith(("dim", "aug")):
+                        root = c[:-1]
+                        if root in PITCH_NAMES and root not in allowed_for_matcher:
+                            allowed_for_matcher.append(root)
+                if gemini_key:
+                    for c in _diatonic_chords(gemini_key):
+                        if c not in allowed_for_matcher:
+                            allowed_for_matcher.append(c)
+
+            _progress_enter("chords")
+            chords = None
+            if chord_recognizer == "btc":
+                # BTC bypasses the Gemini chord-set constraint — the transformer
+                # has its own vocabulary and produces time-aligned segments
+                # natively, so we don't run them through our Viterbi.
+                try:
+                    chords = extract_chords_btc(tmp_path, duration)
+                    if not chords:
+                        raise ValueError("BTC returned no segments")
+                except Exception as e:
+                    print(
+                        f"BTC recognizer failed ({type(e).__name__}: {e}); "
+                        f"falling back to local Pearson+Viterbi"
+                    )
+                    chords = None  # fall through to local path below
+            if chords is None:
+                try:
+                    chords = extract_chords(
+                        y_harm, sr, duration, tuning, vocabulary,
+                        allowed_chord_labels=allowed_for_matcher,
+                    )
+                except ValueError as e:
+                    # The Gemini-restricted template set was too thin / all
+                    # out-of-vocab. Drop the restriction and run full vocabulary.
+                    print(
+                        f"Restricted chord matching failed ({e}); "
+                        f"retrying with full vocabulary"
+                    )
+                    chords = extract_chords(y_harm, sr, duration, tuning, vocabulary)
+                    if chord_provider_used == "hybrid":
+                        chord_provider_used = "local-fallback"
+                    gemini_chord_set = None
+            _progress_complete("chords")
+
+            # Tonic sanity check from chord-timeline signals.
+            key, _key_was = _infer_better_key(key, chords)
+
+            _progress_enter("sections")
+            sections = detect_sections(y_harm, sr, duration, beat_frames)
+            _progress_complete("sections")
+
+            # Whisper path: fires either as the primary provider or as the
+            # fallback when Gemini lyric transcription failed above.
+            if (
+                transcribe_lyrics
+                and vocals_audio is not None
+                and vocals_sr is not None
+                and lyrics is None
+            ):
+                if want_lyric_gemini:
+                    _progress_extend(["lyrics_whisper"])
+                _progress_enter("lyrics_whisper")
+                lyrics = transcribe_vocals(
+                    vocals_audio,
+                    vocals_sr,
+                    model_size="small" if want_lyric_gemini else whisper_model,
+                    initial_prompt=lyric_hint,
+                )
+                lyric_provider_used = (
+                    "whisper-fallback" if want_lyric_gemini else "whisper"
+                )
+                _progress_complete("lyrics_whisper")
+
+            result = AnalysisResult(
+                duration=duration,
+                bpm=bpm,
+                key=key,
+                beats=beat_times,
+                chords=chords,
+                lyrics=lyrics,
+                sections=sections if sections else None,
+                lyric_provider_used=lyric_provider_used,
+                chord_provider_used=chord_provider_used,
+                gemini_chord_set=gemini_chord_set,
+                gemini_key=gemini_key,
+            )
+            # Stash for next time. Skip when Gemini fell back — caching a fallback
+            # would short-circuit every future retry even after Google's outage
+            # clears.
+            fell_back = (
+                chord_provider_used == "local-fallback"
+                or lyric_provider_used == "whisper-fallback"
+            )
+            if fell_back:
+                print(f"[cache] skip put (fallback path: chord={chord_provider_used}, lyric={lyric_provider_used})")
+            else:
+                _cache_put(ck, result.model_dump())
+            return result
+        finally:
+            # Settle the bar at 100% so the frontend's final poll sees completion
+            # before it stops polling, and clean up the tmp copy.
+            _progress["stage"] = "done"
+            _progress["pct"] = 100
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+    finally:
         _analyze_lock.release()
 
 

@@ -257,7 +257,30 @@ exactly as before unless you flip one.
 |---|---|---|
 | `DEMUCS_MODEL`     | `mdx_extra_q` | `htdemucs_ft` — ~2× slower on CPU, noticeably cleaner vocal isolation. Right default when you have a GPU. |
 | `BEAT_TRACKER`     | `librosa`     | `beat_this` — CPJKU "Beat This!" transformer (ISMIR 2024). More accurate on syncopated material. Needs `pip install beat-this`. |
-| `CHORD_RECOGNIZER` | `local`       | `btc` — Bi-directional Transformer for Chord Recognition (170-class). Needs `pip install transformers huggingface_hub`. Bypasses the Gemini chord-set constraint when active. Also exposed as a per-request dropdown in the UI. |
+| `CHORD_RECOGNIZER` | `local`       | `btc` — Bi-directional Transformer for Chord Recognition (170-class). Needs `pip install transformers huggingface_hub` AND `BTC_REVISION` (see below). Bypasses the Gemini chord-set constraint when active. Also exposed as a per-request dropdown in the UI. |
+| `GEMINI_REQUEST_TIMEOUT_SEC` | `120`         | Per-attempt deadline for Gemini calls. A hung TLS connection would otherwise hold the `/analyze` lock indefinitely. |
+
+### BTC: pin a HuggingFace revision
+
+BTC inference uses `trust_remote_code=True`, which executes Python from the
+`puar-playground/btc-chord` HuggingFace repo. If that repo is compromised,
+flipping the BTC switch runs attacker code. To make this an explicit opt-in,
+the module **refuses** to load unless `BTC_REVISION` is set to a specific
+commit SHA. Pick one via:
+
+```bash
+curl https://huggingface.co/api/models/puar-playground/btc-chord/refs
+```
+
+...then:
+
+```powershell
+$env:BTC_REVISION = "<40-char sha>"
+```
+
+If `BTC_REVISION` is unset and you flip `CHORD_RECOGNIZER=btc`, the pipeline
+raises at model load and silently falls back to local Pearson+Viterbi — so
+nothing breaks, you just don't get BTC until you pin a revision.
 
 If an alternative fails to import or run (missing install, model-download
 failure), the pipeline silently falls back to the default. Check the

@@ -9,8 +9,15 @@ from __future__ import annotations
 
 import os
 import time as _time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeoutError
 from pathlib import Path
 from typing import Optional
+
+# Per-attempt deadline. A hung TCP connection to Google would otherwise hold
+# the /analyze lock indefinitely — one bad network event takes the whole
+# server down for new requests. 120s is well above a healthy p99 for both
+# chord-id and lyric-transcription payloads.
+_GEMINI_REQUEST_TIMEOUT_SEC = float(os.environ.get("GEMINI_REQUEST_TIMEOUT_SEC", "120"))
 
 # Model names change frequently: 2.5-pro was deprecated 2026-10-16, 3.5-flash
 # went GA 2026-05-19, and 3.1-pro-preview is the current Pro API id. Override
@@ -54,20 +61,36 @@ def _gemini_generate_with_retry(
     config,
     max_retries: int = 3,
     initial_delay: float = 1.0,
+    timeout_sec: Optional[float] = None,
 ):
     """generate_content with exponential backoff on transient failures.
 
     Retries on 429 (rate limit) and 5xx; fails fast on 4xx client errors so a
-    bad API key or malformed request doesn't eat three attempts.
+    bad API key or malformed request doesn't eat three attempts. Each attempt
+    is wrapped in a thread with a hard deadline so a hung TLS connection
+    can't tie up the /analyze lock forever.
     """
+    if timeout_sec is None:
+        timeout_sec = _GEMINI_REQUEST_TIMEOUT_SEC
     delay = initial_delay
     last_exc: Optional[BaseException] = None
     for attempt in range(max_retries):
         try:
-            return client.models.generate_content(
-                model=model, contents=contents, config=config
-            )
-        except Exception as e:  # genai raises its own exception hierarchy
+            # Thread-wrapped call so we can enforce a deadline regardless of
+            # whatever the google-genai SDK's own HTTP timeouts are set to.
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(
+                    client.models.generate_content,
+                    model=model, contents=contents, config=config,
+                )
+                try:
+                    return future.result(timeout=timeout_sec)
+                except _FutureTimeoutError:
+                    future.cancel()
+                    raise TimeoutError(
+                        f"Gemini request exceeded {timeout_sec:.0f}s deadline"
+                    )
+        except Exception as e:
             last_exc = e
             status = _gemini_status_code(e)
             if status is not None and 400 <= status < 500 and status != 429:

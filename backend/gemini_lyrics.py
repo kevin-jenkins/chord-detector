@@ -33,10 +33,21 @@ def transcribe_with_gemini(
 
     client = _get_genai_client()
 
-    # Encode the vocals stem as 16-bit PCM WAV in memory. Gemini accepts inline
-    # audio up to ~20MB; a multi-minute mono 16kHz stem is well under that.
+    # Resample to 16kHz mono before encoding. Gemini's inline-audio limit
+    # is ~20MB; a 7-min song at the demucs native rate (44.1kHz, mono, 16-bit)
+    # is ~37MB, well over the limit. 16kHz is plenty for word recognition
+    # and matches what the chord-ID path does.
+    import librosa
+    target_sr = 16000
+    if sr != target_sr:
+        vocals_audio = librosa.resample(
+            vocals_audio, orig_sr=sr, target_sr=target_sr
+        )
+    import numpy as np
+    vocals_audio = vocals_audio.astype(np.float32)
+
     buf = io.BytesIO()
-    sf.write(buf, vocals_audio, sr, format="WAV", subtype="PCM_16")
+    sf.write(buf, vocals_audio, target_sr, format="WAV", subtype="PCM_16")
     audio_bytes = buf.getvalue()
     audio_part = genai_types.Part.from_bytes(
         data=audio_bytes, mime_type="audio/wav"
@@ -70,7 +81,7 @@ def transcribe_with_gemini(
         contents=[audio_part, prompt],
         config=genai_types.GenerateContentConfig(
             response_mime_type="application/json",
-            temperature=0.1,  # near-deterministic — same audio should return same words
+            temperature=0.1,  # low variance — not strictly deterministic, but close
         ),
     )
 

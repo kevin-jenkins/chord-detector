@@ -11,22 +11,40 @@ Experimental. Install the extras first:
 
     pip install transformers huggingface_hub
 
+===============================================================================
+SECURITY: BTC inference uses `trust_remote_code=True`, which executes Python
+from the puar-playground/btc-chord HuggingFace repo on every first load. If
+that repo is compromised, flipping the BTC switch runs attacker code on your
+machine. To make this an explicit opt-in, this module REFUSES to load the
+model unless BTC_REVISION is set to a specific commit SHA. Pick one via:
+
+    curl https://huggingface.co/api/models/puar-playground/btc-chord/refs
+
+...then:
+
+    export BTC_REVISION=<40-char sha>
+
+Any time you want to upgrade, repeat the check and update the SHA. See the
+"Experimental: swappable recognizers" section of the README.
+===============================================================================
+
 Enable via the per-request `chord_recognizer=btc` form field, or set the
 env default with CHORD_RECOGNIZER=btc. Falls back to the stock Pearson +
-Viterbi path on any failure (import error, model download fail, or empty
-output), so a missing install never breaks a request.
+Viterbi path on any failure (import error, model download fail, revision
+unset, or empty output), so a missing install never breaks a request.
 
 Notes:
 - BTC produces its own time-aligned segments. We don't feed it through our
   Viterbi — BTC is the recognizer. Gemini's chord-set / key constraints
   used by the hybrid path do NOT apply when BTC is active.
-- Harte qualities outside our vocabulary (e.g., min11, 9) are degraded to
-  the closest triad on the same root rather than dropped — otherwise long
-  stretches of the song would show as "N".
+- Harte qualities outside our vocabulary are degraded to the closest triad
+  on the same root rather than dropped — otherwise long stretches of the
+  song would show as "N". The map below covers the 170-class vocab.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from typing import List, Optional
 
@@ -34,30 +52,64 @@ from models import ChordSegment
 from templates import _FLAT_TO_SHARP, _KNOWN_QUALITIES, PITCH_NAMES
 
 _btc_model = None  # cached across requests
+_BTC_REVISION = os.environ.get("BTC_REVISION", "").strip()
+_BTC_REPO = "puar-playground/btc-chord"
 
 # Harte "quality" → our shorthand. Keys compared against the colon-suffix
 # part of a Harte label; values are our _KNOWN_QUALITIES vocab.
+#
+# The BTC 170-class vocab contains quite a bit more than our 9 qualities, so
+# anything with a sensible closest-match degrades to it (an extended chord
+# collapses to its triad on the same root; a half-dim or diminished-seventh
+# collapses to dim; etc.). Unknown-prefix minor variants degrade to "m" via
+# the fallthrough in _harte_to_shorthand.
 _HARTE_QUALITY_MAP = {
-    "": "",         # bare root = major
-    "maj": "",
-    "min": "m",
-    "7": "7",
-    "maj7": "maj7",
-    "min7": "m7",
-    "sus2": "sus2",
-    "sus4": "sus4",
-    "dim": "dim",
-    "aug": "aug",
-    # Degraded mappings — pick the closest triad on the same root.
-    "min9": "m",
-    "min11": "m",
-    "9": "7",
-    "11": "7",
-    "13": "7",
-    "6": "",
-    "min6": "m",
-    "dim7": "dim",
-    "hdim7": "dim",
+    # Exact-match qualities we have templates for.
+    "":        "",     # bare root = major
+    "maj":     "",
+    "min":     "m",
+    "7":       "7",
+    "maj7":    "maj7",
+    "min7":    "m7",
+    "sus2":    "sus2",
+    "sus4":    "sus4",
+    "dim":     "dim",
+    "aug":     "aug",
+    # Extended / enriched chords — degrade to the triad on the same root.
+    "6":       "",
+    "9":       "7",
+    "11":      "7",
+    "13":      "7",
+    "maj6":    "",
+    "maj9":    "maj7",
+    "maj11":   "maj7",
+    "maj13":   "maj7",
+    "add9":    "",
+    "add11":   "",
+    "7sus4":   "sus4",
+    "7sus2":   "sus2",
+    "9sus4":   "sus4",
+    # Minor family.
+    "min6":    "m",
+    "min9":    "m7",
+    "min11":   "m7",
+    "min13":   "m7",
+    "minmaj7": "m",
+    "minmaj9": "m",
+    "min7b5":  "dim",
+    # Diminished / augmented family.
+    "dim7":    "dim",
+    "hdim7":   "dim",
+    "aug7":    "aug",
+    "augmaj7": "aug",
+    "aug9":    "aug",
+    # Dominant alterations — fold back into the base 7.
+    "7b5":     "7",
+    "7#5":     "7",
+    "7b9":     "7",
+    "7#9":     "7",
+    "7b13":    "7",
+    "7#11":    "7",
 }
 
 
@@ -100,15 +152,30 @@ def _harte_to_shorthand(label: str) -> Optional[str]:
 
 
 def _get_btc_model():
-    """Lazy-load the BTC model once per process."""
+    """Lazy-load the BTC model once per process.
+
+    Raises RuntimeError when BTC_REVISION is unset — see the module-level
+    SECURITY block for the rationale. Caller is expected to catch and fall
+    back silently.
+    """
     global _btc_model
     if _btc_model is not None:
         return _btc_model
+    if not _BTC_REVISION:
+        raise RuntimeError(
+            "BTC_REVISION env var not set. BTC uses trust_remote_code=True "
+            "and loading an unpinned revision is unsafe. Set BTC_REVISION to "
+            f"a specific commit SHA from https://huggingface.co/{_BTC_REPO}/commits"
+        )
     from transformers import AutoModel
-    print("Loading BTC chord recognizer (first run downloads weights)...")
+    print(
+        f"Loading BTC chord recognizer from {_BTC_REPO}@{_BTC_REVISION[:12]} "
+        f"(trust_remote_code=True — this executes third-party Python)..."
+    )
     _btc_model = AutoModel.from_pretrained(
-        "puar-playground/btc-chord",
+        _BTC_REPO,
         trust_remote_code=True,
+        revision=_BTC_REVISION,
     )
     return _btc_model
 

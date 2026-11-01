@@ -383,6 +383,11 @@ export default function Home() {
               <option value="btc">BTC transformer (experimental)</option>
             </select>
           </label>
+          {chordRecognizer === "btc" && chordProvider === "hybrid" && (
+            <span style={{ fontSize: 12, color: "var(--muted, #999)", fontStyle: "italic" }}>
+              Note: BTC ignores the Gemini chord set — hybrid mode has no effect.
+            </span>
+          )}
           {(chordProvider === "hybrid" || (transcribeLyrics && lyricProvider === "gemini")) && (
             <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
               Gemini model:

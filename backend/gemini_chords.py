@@ -256,7 +256,7 @@ def identify_chords_with_gemini(
         contents=[audio_part, prompt],
         config=genai_types.GenerateContentConfig(
             response_mime_type="application/json",
-            temperature=0.1,  # near-deterministic — same audio should return same chord set
+            temperature=0.1,  # low variance — not strictly deterministic, but close
         ),
     )
 
