@@ -4,6 +4,13 @@ Pearson (not cosine) matters: with cosine similarity, noisy or near-uniform
 chroma scores ~equally against every template, so C major wins by tiebreak.
 Pearson centers the mean first, so uniform chroma scores ~0 against anything.
 
+When beat times are available, matching is beat-synchronous: chroma is
+summarized (median) within each beat and the Viterbi pass picks one chord per beat. The
+shortest possible chord is one beat, and changes land on the beat grid. The
+older frame-level path (~93ms frames, heavy smoothing, 1s minimum segment)
+remains as a fallback for audio without a usable beat track. That 1s floor
+swallowed 2-beat chords at ~117 BPM, which is why beat sync is the default.
+
 The Viterbi pass biases toward self-transitions so two-guitar flicker (E ↔
 Em) collapses — a competing chord has to beat the previous one by `self_bonus`
 in Pearson score before the matcher flips.
@@ -12,7 +19,7 @@ in Pearson score before the matcher flips.
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import librosa
 import numpy as np
@@ -120,55 +127,88 @@ def _custom_templates_from_labels(labels: List[str]) -> Tuple[List[str], np.ndar
     return kept, _center_and_normalize(matrix, axis=1)
 
 
-def extract_chords(
-    y_harm: np.ndarray,
-    sr: int,
-    duration: float,
-    tuning: float,
-    vocabulary: str = "triads",
-    allowed_chord_labels: Optional[List[str]] = None,
-) -> List[ChordSegment]:
-    """Chord recognition — see module docstring for pipeline rationale.
+# Any frame/beat where no chord template beats this Pearson floor routes
+# through the N (no chord) state.
+_N_FLOOR = 0.2
+_CHROMA_HOP = 2048  # ~93ms per frame at sr=22050 (frame-level fallback)
+# Finer frames for beat sync: with 93ms frames, beat boundaries snap to the
+# wrong frame and each beat's chroma leaks into its neighbors, which halved
+# the margin a one-beat passing chord needs to survive.
+_BEAT_CHROMA_HOP = 512  # ~23ms
+_MIN_BEATS_FOR_SYNC = 8
+# Per-beat switch penalty. Tuned on a 117 BPM track whose chords change every
+# 2 beats: 0.1 let half-beat flicker through, 0.3 started dropping real
+# 2-beat chords.
+_BEAT_SELF_BONUS = 0.2
 
-    When `allowed_chord_labels` is non-empty, templates are restricted to
-    those chords (hybrid mode — Gemini identifies the chord set, we do the
-    timing). Raises ValueError if fewer than 2 labels survive validation.
-    """
-    if allowed_chord_labels:
-        labels_for_state, template_z = _custom_templates_from_labels(allowed_chord_labels)
-    else:
-        if vocabulary not in _TEMPLATES:
-            vocabulary = "triads"
-        labels_for_state, template_z = _TEMPLATES[vocabulary]
 
-    hop = 2048  # ~93ms per frame at sr=22050
-    chroma = librosa.feature.chroma_cqt(
+def _path_to_labels(path: np.ndarray, labels_for_state: List[str]) -> List[str]:
+    n_state_idx = len(labels_for_state)  # last index = N
+    return ["N" if i == n_state_idx else labels_for_state[i] for i in path.tolist()]
+
+
+def _viterbi_labels(
+    chroma: np.ndarray, template_z: np.ndarray, labels_for_state: List[str], self_bonus: float
+) -> List[str]:
+    sims = template_z @ _center_and_normalize(chroma, axis=0)  # (n_templates, n_cols)
+    emission = np.vstack([sims, np.full((1, sims.shape[1]), _N_FLOOR)])
+    return _path_to_labels(_viterbi(emission, self_bonus=self_bonus), labels_for_state)
+
+
+def _chroma(y_harm: np.ndarray, sr: int, tuning: float, hop: int) -> np.ndarray:
+    return librosa.feature.chroma_cqt(
         y=y_harm, sr=sr, hop_length=hop, bins_per_octave=36, tuning=tuning
     )
-    chroma = median_filter(chroma, size=(1, 5))  # ~465ms smoothing
 
-    chroma_z = _center_and_normalize(chroma, axis=0)        # (12, n_frames)
-    sims = template_z @ chroma_z                            # (n_templates, n_frames)
 
-    # Treat the silence threshold itself as a state: any frame where no chord
-    # template beats this floor will route through the N state.
-    N_FLOOR = 0.2
-    n_emission = np.full((1, sims.shape[1]), N_FLOOR)
-    emission = np.vstack([sims, n_emission])
+def _beat_sync_segments(
+    y_harm: np.ndarray,
+    sr: int,
+    tuning: float,
+    duration: float,
+    beat_times: Sequence[float],
+    template_z: np.ndarray,
+    labels_for_state: List[str],
+) -> List[tuple]:
+    """One chord per beat: median chroma within each beat, Viterbi over beats."""
+    chroma = _chroma(y_harm, sr, tuning, _BEAT_CHROMA_HOP)
+    frames = librosa.time_to_frames(np.asarray(beat_times, dtype=float), sr=sr, hop_length=_BEAT_CHROMA_HOP)
+    frames = np.unique(np.clip(frames, 0, chroma.shape[1] - 1))
+    beat_chroma = librosa.util.sync(chroma, frames, aggregate=np.median)  # (12, len(frames)+1)
+    edges = np.concatenate([
+        [0.0], librosa.frames_to_time(frames, sr=sr, hop_length=_BEAT_CHROMA_HOP), [duration]
+    ])
+    labels = _viterbi_labels(beat_chroma, template_z, labels_for_state, _BEAT_SELF_BONUS)
+
+    segs: List[tuple] = []
+    for i, label in enumerate(labels):
+        start, end = float(edges[i]), float(min(edges[i + 1], duration))
+        if end <= start:
+            continue
+        if segs and segs[-1][2] == label:
+            segs[-1] = (segs[-1][0], end, label)
+        else:
+            segs.append((start, end, label))
+    return segs
+
+
+def _frame_segments(
+    y_harm: np.ndarray,
+    sr: int,
+    tuning: float,
+    duration: float,
+    template_z: np.ndarray,
+    labels_for_state: List[str],
+) -> List[tuple]:
+    """Frame-level fallback for audio without a usable beat track."""
+    chroma = median_filter(_chroma(y_harm, sr, tuning, _CHROMA_HOP), size=(1, 5))  # ~465ms smoothing
 
     # 0.5 ≈ "a competing chord needs to score 0.5 higher in Pearson r to
-    # overcome the cost of switching." Tuned for rhythm-guitar/bass-anchored
-    # detection — the matcher only flips on actual chord changes.
-    path = _viterbi(emission, self_bonus=0.5)
-
-    n_state_idx = len(labels_for_state)  # last index = N
-    labels = [
-        "N" if i == n_state_idx else labels_for_state[i]
-        for i in path.tolist()
-    ]
+    # overcome the cost of switching."
+    labels = _viterbi_labels(chroma, template_z, labels_for_state, self_bonus=0.5)
 
     frame_times = librosa.frames_to_time(
-        np.arange(len(labels)), sr=sr, hop_length=hop
+        np.arange(len(labels)), sr=sr, hop_length=_CHROMA_HOP
     )
 
     # Build raw segments at label-change boundaries.
@@ -193,5 +233,38 @@ def extract_chords(
             merged[-1] = (prev_start, end, prev_label)
         else:
             merged.append((start, end, label))
+    return merged
 
-    return [ChordSegment(start=s, end=e, label=l) for s, e, l in merged]
+
+def extract_chords(
+    y_harm: np.ndarray,
+    sr: int,
+    duration: float,
+    tuning: float,
+    vocabulary: str = "triads",
+    allowed_chord_labels: Optional[List[str]] = None,
+    beat_times: Optional[Sequence[float]] = None,
+) -> List[ChordSegment]:
+    """Chord recognition — see module docstring for pipeline rationale.
+
+    When `allowed_chord_labels` is non-empty, templates are restricted to
+    those chords (hybrid mode — Gemini identifies the chord set, we do the
+    timing). Raises ValueError if fewer than 2 labels survive validation.
+    With at least _MIN_BEATS_FOR_SYNC `beat_times` (seconds), matching is
+    beat-synchronous; otherwise it falls back to the frame-level path.
+    """
+    if allowed_chord_labels:
+        labels_for_state, template_z = _custom_templates_from_labels(allowed_chord_labels)
+    else:
+        if vocabulary not in _TEMPLATES:
+            vocabulary = "triads"
+        labels_for_state, template_z = _TEMPLATES[vocabulary]
+
+    if beat_times is not None and len(beat_times) >= _MIN_BEATS_FOR_SYNC:
+        segs = _beat_sync_segments(
+            y_harm, sr, tuning, duration, beat_times, template_z, labels_for_state
+        )
+    else:
+        segs = _frame_segments(y_harm, sr, tuning, duration, template_z, labels_for_state)
+
+    return [ChordSegment(start=s, end=e, label=l) for s, e, l in segs]
