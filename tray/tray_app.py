@@ -23,6 +23,8 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 import pystray
 
+import service_procs
+
 BACKEND_URL = "http://127.0.0.1:8010"  # must match the port in backend/main.py
 FRONTEND_URL = "http://localhost:3000"
 HEALTH_POLL_SECONDS = 5
@@ -91,13 +93,19 @@ def _open_logs(icon=None, item=None) -> None:
     os.startfile(str(LOG_DIR))  # type: ignore[attr-defined]
 
 
-def _restart_task(task_name: str) -> None:
+def _restart_task(task_name: str, service: str) -> None:
     # schtasks /end returns non-zero when the task isn't running; that's fine.
     subprocess.run(
         ["schtasks", "/end", "/tn", task_name],
         capture_output=True,
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
+    # /end only kills the task's powershell wrapper; the server it launched
+    # survives and keeps the port, so kill that chain before starting anew.
+    try:
+        service_procs.kill_services([service], root=PROJECT_ROOT)
+    except Exception:
+        pass  # best effort: still try to start the task
     subprocess.run(
         ["schtasks", "/run", "/tn", task_name],
         capture_output=True,
@@ -106,11 +114,11 @@ def _restart_task(task_name: str) -> None:
 
 
 def _restart_backend(icon=None, item=None) -> None:
-    threading.Thread(target=_restart_task, args=(BACKEND_TASK,), daemon=True).start()
+    threading.Thread(target=_restart_task, args=(BACKEND_TASK, "backend"), daemon=True).start()
 
 
 def _restart_frontend(icon=None, item=None) -> None:
-    threading.Thread(target=_restart_task, args=(FRONTEND_TASK,), daemon=True).start()
+    threading.Thread(target=_restart_task, args=(FRONTEND_TASK, "frontend"), daemon=True).start()
 
 
 def _quit(icon: pystray.Icon, item=None) -> None:
