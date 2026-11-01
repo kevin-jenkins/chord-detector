@@ -69,6 +69,12 @@ _CHORD_PROVIDERS = {"hybrid", "local"}
 _CHORD_RECOGNIZERS = {"local", "btc"}
 _CHORD_RECOGNIZER_DEFAULT = os.environ.get("CHORD_RECOGNIZER", "local")
 
+# Part of the result-cache key. Bump whenever the pipeline would produce a
+# different result for the same audio + form params, or old cached results
+# keep being served. 2 = beat-synchronous chord matching; 3 = 2-beat minimum
+# chord length; 4 = prefer Gemini's chords, no iii in the diatonic net.
+_PIPELINE_VERSION = 4
+
 # Request-level serialization: single-user local app, so if a second /analyze
 # arrives mid-analysis we return 409 rather than letting the two trample
 # shared progress + cache state.
@@ -182,6 +188,7 @@ def analyze(
             gemini_model=gemini_model,
             gemini_lyric_model=gemini_lyric_model,
             chord_recognizer=chord_recognizer,
+            pipeline_version=_PIPELINE_VERSION,
         )
         cached = _cache_get(ck)
         if cached is not None:
@@ -359,6 +366,8 @@ def analyze(
                     chords = extract_chords(
                         y_harm, sr, duration, tuning, vocabulary,
                         allowed_chord_labels=allowed_for_matcher,
+                        beat_times=beat_times,
+                        preferred_chord_labels=gemini_chord_set,
                     )
                 except ValueError as e:
                     # The Gemini-restricted template set was too thin / all
@@ -367,7 +376,9 @@ def analyze(
                         f"Restricted chord matching failed ({e}); "
                         f"retrying with full vocabulary"
                     )
-                    chords = extract_chords(y_harm, sr, duration, tuning, vocabulary)
+                    chords = extract_chords(
+                        y_harm, sr, duration, tuning, vocabulary, beat_times=beat_times,
+                    )
                     if chord_provider_used == "hybrid":
                         chord_provider_used = "local-fallback"
                     gemini_chord_set = None
