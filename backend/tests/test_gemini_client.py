@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from gemini_client import (
+    _GEMINI_LYRIC_MODELS,
     _GEMINI_MODEL,
     _GEMINI_MODELS,
     _gemini_generate_with_retry,
@@ -32,6 +33,21 @@ class TestResolveModel:
 
     def test_none_falls_back_to_default(self):
         assert _resolve_model(None) == _GEMINI_MODEL
+
+    def test_lyric_only_model_rejected_for_chords(self):
+        # Chord-ID resolves against _GEMINI_MODELS, which excludes lyric-only
+        # models — they must fall back to the default.
+        assert "gemini-3.8-flash" not in _GEMINI_MODELS
+        assert _resolve_model("gemini-3.8-flash") == _GEMINI_MODEL
+
+    def test_lyric_only_model_allowed_for_lyrics(self):
+        assert (
+            _resolve_model("gemini-3.8-flash", _GEMINI_LYRIC_MODELS)
+            == "gemini-3.8-flash"
+        )
+
+    def test_lyric_set_is_superset_of_chord_set(self):
+        assert _GEMINI_MODELS <= _GEMINI_LYRIC_MODELS
 
 
 # ---- _gemini_status_code --------------------------------------------------

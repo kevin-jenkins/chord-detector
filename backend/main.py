@@ -46,7 +46,7 @@ from gemini_chords import (
     _infer_better_key,
     identify_chords_with_gemini,
 )
-from gemini_client import _GEMINI_MODELS, _log_gemini_failure
+from gemini_client import _GEMINI_LYRIC_MODELS, _GEMINI_MODELS, _log_gemini_failure
 from gemini_lyrics import transcribe_with_gemini
 from models import AnalysisResult, LyricWord
 from progress import (
@@ -115,6 +115,7 @@ def analyze(
     lyric_provider: str = Form("gemini"),
     chord_provider: str = Form("hybrid"),
     gemini_model: str = Form(""),
+    gemini_lyric_model: str = Form(""),
     chord_recognizer: str = Form(""),
 ):
     if lyric_provider not in _LYRIC_PROVIDERS:
@@ -128,6 +129,12 @@ def analyze(
     # Per-request override (form value > env default). Empty / invalid →
     # use the env-configured _GEMINI_MODEL.
     gemini_model_override = gemini_model if gemini_model in _GEMINI_MODELS else None
+    # Lyrics can use their own model (e.g. the transcription-specialized one);
+    # empty / invalid means "same as gemini_model".
+    gemini_lyric_override = (
+        gemini_lyric_model if gemini_lyric_model in _GEMINI_LYRIC_MODELS
+        else gemini_model_override
+    )
     # NOTE: sync handler on purpose. The heavy work (librosa, demucs, whisper)
     # is all blocking, so running this on the asyncio event loop would freeze
     # GET /progress until analysis finishes. FastAPI runs sync handlers in its
@@ -173,6 +180,7 @@ def analyze(
             lyric_provider=lyric_provider,
             chord_provider=chord_provider,
             gemini_model=gemini_model,
+            gemini_lyric_model=gemini_lyric_model,
             chord_recognizer=chord_recognizer,
         )
         cached = _cache_get(ck)
@@ -265,7 +273,7 @@ def analyze(
                         ex.submit(
                             transcribe_with_gemini,
                             vocals_audio, vocals_sr,
-                            lyric_hint, gemini_model_override,
+                            lyric_hint, gemini_lyric_override,
                         )
                         if run_lyric_gemini
                         else None
