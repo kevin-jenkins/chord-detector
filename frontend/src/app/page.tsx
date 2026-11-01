@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
 import ChordTimeline from "@/components/ChordTimeline";
-import { AnalysisResult } from "@/components/types";
+import ChordEditBar from "@/components/ChordEditBar";
+import { AnalysisResult, ChordSegment } from "@/components/types";
+import { deleteChord, editsStorageKey, loadEdits, relabelChord, saveEdits } from "@/components/chordEdits";
 import { transposeKey } from "@/components/chord";
 import { exportChordPro, downloadText } from "@/components/export";
 import { exportTab } from "@/components/tabExport";
@@ -14,6 +16,13 @@ const API = "http://127.0.0.1:8010";
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  // Hand corrections. null = showing the detected chords as-is. The undo
+  // stack holds previous values of editedChords (null meaning "detected").
+  const [editedChords, setEditedChords] = useState<ChordSegment[] | null>(null);
+  const [undoStack, setUndoStack] = useState<(ChordSegment[] | null)[]>([]);
+  const [editing, setEditing] = useState(false);
+  const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
+  const [editsKey, setEditsKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -162,6 +171,97 @@ export default function Home() {
     }
   };
 
+  // ---- Chord corrections -------------------------------------------------
+
+  // Edits are saved per detected result (see editsStorageKey), so a reload
+  // keeps them and a re-analysis with different output starts clean.
+  useEffect(() => {
+    setEditedChords(null);
+    setUndoStack([]);
+    setSelectedIdx(null);
+    setEditing(false);
+    setEditsKey(null);
+    if (!result) return;
+    let cancelled = false;
+    editsStorageKey(result.duration, result.chords).then((key) => {
+      if (cancelled) return;
+      setEditsKey(key);
+      setEditedChords(loadEdits(key));
+    });
+    return () => { cancelled = true; };
+  }, [result]);
+
+  const chords: ChordSegment[] = editedChords ?? result?.chords ?? [];
+
+  // Chords already in the song, most-used first, as one-click replacements.
+  const quickPicks = useMemo(() => {
+    const time = new Map<string, number>();
+    for (const c of chords) {
+      if (c.label !== "N") time.set(c.label, (time.get(c.label) ?? 0) + (c.end - c.start));
+    }
+    return Array.from(time.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([l]) => l);
+  }, [chords]);
+
+  const commitEdit = (next: ChordSegment[]) => {
+    setUndoStack((s) => [...s, editedChords]);
+    setEditedChords(next);
+    if (editsKey) saveEdits(editsKey, next);
+  };
+
+  const applyLabel = (label: string) => {
+    if (selectedIdx === null) return;
+    const sel = chords[selectedIdx];
+    const next = relabelChord(chords, selectedIdx, label);
+    commitEdit(next);
+    // Merging with a neighbor can shift indices; keep the same moment selected.
+    const mid = (sel.start + sel.end) / 2;
+    setSelectedIdx(next.findIndex((c) => mid >= c.start && mid < c.end));
+  };
+
+  const deleteSelected = () => {
+    if (selectedIdx === null) return;
+    commitEdit(deleteChord(chords, selectedIdx));
+    setSelectedIdx(null);
+  };
+
+  const undoEdit = () => {
+    if (undoStack.length === 0) return;
+    const prev = undoStack[undoStack.length - 1];
+    setUndoStack((s) => s.slice(0, -1));
+    setEditedChords(prev);
+    setSelectedIdx(null);
+    if (editsKey) saveEdits(editsKey, prev);
+  };
+
+  const revertEdits = () => {
+    if (!window.confirm("Discard all your chord edits for this song?")) return;
+    setEditedChords(null);
+    setUndoStack([]);
+    setSelectedIdx(null);
+    if (editsKey) saveEdits(editsKey, null);
+  };
+
+  // Delete removes the selected chord, Esc deselects, Ctrl/Cmd+Z undoes —
+  // except while typing in a field.
+  useEffect(() => {
+    if (!editing) return;
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT")) return;
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedIdx !== null) {
+        e.preventDefault();
+        deleteSelected();
+      } else if (e.key === "Escape") {
+        setSelectedIdx(null);
+      } else if (e.key === "z" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        undoEdit();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
   // ---- Wavesurfer setup --------------------------------------------------
 
   // The wave container is rendered conditionally on `result`, so we must
@@ -223,7 +323,7 @@ export default function Home() {
       key: result.key,
       bpm: result.bpm,
       duration: result.duration,
-      chords: result.chords,
+      chords,
       beats: result.beats,
       lyrics: result.lyrics ?? null,
       semitones,
@@ -240,7 +340,7 @@ export default function Home() {
       key: result.key,
       bpm: result.bpm,
       duration: result.duration,
-      chords: result.chords,
+      chords,
       lyrics: result.lyrics ?? null,
       sections: result.sections ?? null,
       capo: capoSuggestion,
@@ -593,7 +693,10 @@ export default function Home() {
             </div>
             <div>
               <span style={{ color: "var(--muted)", fontSize: 12 }}>CHORDS </span>
-              <strong>{result.chords.filter((c) => c.label !== "N").length}</strong>
+              <strong>{chords.filter((c) => c.label !== "N").length}</strong>
+              {editedChords && (
+                <span style={{ color: "var(--accent)", fontSize: 12, marginLeft: 6 }}>✎ edited</span>
+              )}
             </div>
             {processingTimeSec !== null && (
               <div>
@@ -694,13 +797,52 @@ export default function Home() {
             </div>
           </div>
 
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+            <button
+              onClick={() => { setEditing((e) => !e); setSelectedIdx(null); }}
+              style={editing ? { borderColor: "var(--accent)", color: "var(--accent-bright)" } : undefined}
+            >
+              {editing ? "Done editing" : "Edit chords"}
+            </button>
+            {editing && (
+              <button onClick={undoEdit} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">
+                Undo
+              </button>
+            )}
+            {editedChords && (
+              <button onClick={revertEdits}>Revert to detected</button>
+            )}
+            <span style={{ color: "var(--muted)", fontSize: 12 }}>
+              {editing
+                ? "Click a chord to change or delete it. Delete removes the selected chord."
+                : editedChords
+                  ? "Showing your edits. They're saved in this browser."
+                  : ""}
+            </span>
+          </div>
+
           <ChordTimeline
-            chords={result.chords}
+            chords={chords}
             duration={result.duration}
             currentTime={currentTime}
             semitones={semitones}
             onSeek={seek}
+            editing={editing}
+            selectedIndex={selectedIdx}
+            onSelect={setSelectedIdx}
           />
+
+          {editing && selectedIdx !== null && chords[selectedIdx] && (
+            <ChordEditBar
+              chord={chords[selectedIdx]}
+              semitones={semitones}
+              quickPicks={quickPicks}
+              canDelete={chords.length > 1}
+              onApply={applyLabel}
+              onDelete={deleteSelected}
+              onClose={() => setSelectedIdx(null)}
+            />
+          )}
         </>
       )}
     </main>
