@@ -19,13 +19,22 @@ from typing import Optional
 # chord-id and lyric-transcription payloads.
 _GEMINI_REQUEST_TIMEOUT_SEC = float(os.environ.get("GEMINI_REQUEST_TIMEOUT_SEC", "120"))
 
-# Model names change frequently: 2.5-pro was deprecated 2026-10-16, 3.5-flash
-# went GA 2026-05-19, and 3.1-pro-preview is the current Pro API id. Override
-# via GEMINI_MODEL env var or the per-request `gemini_model` form field, and
-# bump _GEMINI_MODELS when Google releases new ones. Verify current ids via
-# https://generativelanguage.googleapis.com/v1beta/models before shipping.
+# Model names change frequently; 3.1-pro-preview is the newest explicitly
+# versioned Pro as of Nov 2026. Override via GEMINI_MODEL env var or the
+# per-request form fields, and bump these sets when Google releases new ones.
+# Verify ids with client.models.list() before shipping.
 _GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
-_GEMINI_MODELS = {"gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.1-pro-preview"}
+_GEMINI_MODELS = {
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-3.1-pro-preview",
+}
+# Lyrics-only models. gemini-3.8-flash transcribed a test clip perfectly but
+# scored 0/4 on a synthetic D-A-Em-G chord-ID test (twice, with different
+# wrong answers), so it's kept out of the chord path. gemini-3.5-transcribe
+# was also tried and isn't usable here: it rejects JSON mode and returns an
+# empty response without it.
+_GEMINI_LYRIC_MODELS = _GEMINI_MODELS | {"gemini-3.8-flash"}
 
 _genai_client = None
 
@@ -130,6 +139,9 @@ def _log_gemini_failure(kind: str, exc: BaseException) -> None:
         print(f"[gemini-failure-log] could not write log: {log_exc}")
 
 
-def _resolve_model(override: Optional[str]) -> str:
-    """Pick the model to use for a request: override if valid, else env default."""
-    return override if override in _GEMINI_MODELS else _GEMINI_MODEL
+def _resolve_model(
+    override: Optional[str], allowed: frozenset | set = frozenset()
+) -> str:
+    """Pick the model for a request: override if it's in `allowed`, else env default."""
+    allowed = allowed or _GEMINI_MODELS
+    return override if override in allowed else _GEMINI_MODEL

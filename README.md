@@ -195,7 +195,8 @@ What the controls do:
 | **Transcribe lyrics** | Send the vocals stem to your chosen lyric provider. Default on. |
 | **Chord vocabulary** | Triads / Triads + 7ths / Extended (sus, dim, aug, 7ths). Default triads. |
 | **Chord detection** | Hybrid (Gemini identifies the chord set + key, local Pearson + Viterbi handles timing) or Local only. Hybrid is dramatically better on the user's material. |
-| **Gemini model** | 2.5 Flash (fast, free tier) or 2.5 Pro (slower, billing required). Pro is meaningfully better on dense mixes. |
+| **Gemini model** | 3.5 / 3.6 Flash (fast) or 3.1 Pro Preview (slower, billing required). Pro is meaningfully better on dense mixes. Used for chord identification, and for lyrics unless Lyric model overrides it. |
+| **Lyric model** | Optional lyrics-only override. "Same as Gemini model" by default; also offers 3.8 Flash, which transcribed well in testing but was unreliable at chord identification, so it's lyrics-only. |
 | **Provider** (lyrics) | Gemini (cloud) or Whisper (local). |
 | **Hint** | Free-text passed into the Gemini prompts as context — useful for band names, song titles, genre hints that bias the model toward the right vocabulary. |
 | **Transpose ± / Reset** | Shift the whole chart up/down semitones. |

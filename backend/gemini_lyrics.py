@@ -14,6 +14,7 @@ from typing import List, Optional
 import numpy as np
 
 from gemini_client import (
+    _GEMINI_LYRIC_MODELS,
     _gemini_generate_with_retry,
     _get_genai_client,
     _resolve_model,
@@ -77,7 +78,7 @@ def transcribe_with_gemini(
 
     response = _gemini_generate_with_retry(
         client,
-        model=_resolve_model(model_override),
+        model=_resolve_model(model_override, _GEMINI_LYRIC_MODELS),
         contents=[audio_part, prompt],
         config=genai_types.GenerateContentConfig(
             response_mime_type="application/json",
