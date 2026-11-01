@@ -121,6 +121,62 @@ npm run dev
 
 Open `http://localhost:3000`.
 
+## Running as a background service (Windows)
+
+Set it up once and both the backend and the frontend start automatically at
+log-on; a tray icon lets you open the app with one click and tells you at a
+glance whether the backend is healthy.
+
+Prereqs:
+
+1. Backend venv exists with `pip install -r backend/requirements.txt`.
+2. Install the tray's extras into the **same venv**:
+   ```powershell
+   cd backend
+   .venv\Scripts\Activate.ps1
+   pip install -r ..\tray\requirements.txt
+   ```
+3. Build the frontend for production (the dev server is not used here):
+   ```powershell
+   cd frontend
+   npm install
+   npm run build
+   ```
+
+Then register the three scheduled tasks (no admin required):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install-tasks.ps1
+```
+
+That registers three "At log on" tasks:
+
+| Task | What it runs |
+|---|---|
+| `ChordDetectorBackend`  | `backend/.venv/Scripts/python.exe backend/main.py` |
+| `ChordDetectorFrontend` | `npm start` inside `frontend/` (the built production server) |
+| `ChordDetectorTray`     | `pythonw.exe tray/tray_app.py` (no console) |
+
+Logs land in `logs/backend.log` and `logs/frontend.log`, each capped at ~10 MB
+on startup. The tray icon:
+
+- **Green** — backend `/health` is responding.
+- **Red** — backend not reachable.
+- **Amber** — unknown (first few seconds).
+
+Menu: *Open Chord Detector*, *Restart backend*, *Restart frontend*,
+*Open logs folder*, *Quit tray*. "Quit tray" only closes the tray — the
+backend and frontend keep running. To stop or remove everything:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\uninstall-tasks.ps1
+```
+
+Caveat: these are user tasks that start at log-on, not true Windows services —
+they won't run before you log in, and they stop at log-off. For a true
+pre-login service, wrap `run-backend.ps1` / `run-frontend.ps1` with
+[NSSM](https://nssm.cc/) instead.
+
 ## Using it
 
 Drop an audio file on the upload zone. Default settings analyze with stem
