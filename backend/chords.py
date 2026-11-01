@@ -85,6 +85,63 @@ def _viterbi(emission: np.ndarray, self_bonus: float) -> np.ndarray:
     return path
 
 
+def _viterbi_min_duration(
+    emission: np.ndarray, switch_penalty: float, min_len: int
+) -> np.ndarray:
+    """Like _viterbi, but once a state is entered it must last at least
+    `min_len` steps. Switching costs `switch_penalty` (the same trade-off as
+    _viterbi's self_bonus; min_len=1 reduces to it).
+
+    Each state c expands into substates 0..min_len-1. (c,i) can only advance
+    to (c,i+1); only the last substate can stay put or switch to another
+    state's substate 0. The first and last segments are exempt: the path may
+    start or end in any substate, since the song can begin or end mid-chord.
+    """
+    n_states, n_frames = emission.shape
+    last = min_len - 1
+    neg = -np.inf
+    idx = np.arange(n_states)
+
+    delta = np.full((n_states, min_len), neg)
+    delta[:, 0] = emission[:, 0]
+    delta[:, last] = emission[:, 0]
+    back = np.zeros((n_frames, n_states, min_len, 2), dtype=np.int32)
+
+    for t in range(1, n_frames):
+        new = np.full((n_states, min_len), neg)
+        bp = np.zeros((n_states, min_len, 2), dtype=np.int32)
+
+        for i in range(1, min_len):  # advance within a chord
+            new[:, i] = delta[:, i - 1]
+            bp[:, i, 0], bp[:, i, 1] = idx, i - 1
+
+        stay = delta[:, last]  # hold a chord that has met its minimum
+        better = stay > new[:, last]
+        new[better, last] = stay[better]
+        bp[better, last, 0], bp[better, last, 1] = idx[better], last
+
+        # Switch into substate 0 from the best *other* state's last substate.
+        leave = delta[:, last] - switch_penalty
+        order = np.argsort(leave)[::-1]
+        best, second = order[0], order[1]
+        src = np.where(idx == best, second, best)
+        cand = leave[src]
+        better = cand > new[:, 0]
+        new[better, 0] = cand[better]
+        bp[better, 0, 0], bp[better, 0, 1] = src[better], last
+
+        delta = new + emission[:, t][:, None]
+        back[t] = bp
+
+    c, i = np.unravel_index(int(np.argmax(delta)), delta.shape)
+    path = np.empty(n_frames, dtype=np.int32)
+    for t in range(n_frames - 1, -1, -1):
+        path[t] = c
+        if t > 0:
+            c, i = back[t, c, i]
+    return path
+
+
 def _custom_templates_from_labels(labels: List[str]) -> Tuple[List[str], np.ndarray]:
     """Build a Pearson-ready template matrix for an arbitrary list of chord
     labels (e.g. ["D", "A", "Em", "G"]). Labels whose quality we don't have
@@ -136,10 +193,15 @@ _CHROMA_HOP = 2048  # ~93ms per frame at sr=22050 (frame-level fallback)
 # the margin a one-beat passing chord needs to survive.
 _BEAT_CHROMA_HOP = 512  # ~23ms
 _MIN_BEATS_FOR_SYNC = 8
-# Per-beat switch penalty. Tuned on a 117 BPM track whose chords change every
-# 2 beats: 0.1 let half-beat flicker through, 0.3 started dropping real
-# 2-beat chords.
-_BEAT_SELF_BONUS = 0.2
+# Per-beat switch penalty, tuned together with _MIN_CHORD_BEATS on a 117 BPM
+# track whose chords change every 2 beats. The minimum duration already
+# suppresses flicker, so the penalty only needs to be small: 0.0-0.1 gave the
+# same chart, and 0.2 started merging real 2-beat chords.
+_BEAT_SELF_BONUS = 0.1
+# Shortest chord the beat path will report. One-beat "changes" on real
+# material turned out to be passing notes (bass or melody over a held chord),
+# not chords; a 2-beat floor makes the matcher judge those beats together.
+_MIN_CHORD_BEATS = 2
 
 
 def _path_to_labels(path: np.ndarray, labels_for_state: List[str]) -> List[str]:
@@ -148,11 +210,19 @@ def _path_to_labels(path: np.ndarray, labels_for_state: List[str]) -> List[str]:
 
 
 def _viterbi_labels(
-    chroma: np.ndarray, template_z: np.ndarray, labels_for_state: List[str], self_bonus: float
+    chroma: np.ndarray,
+    template_z: np.ndarray,
+    labels_for_state: List[str],
+    self_bonus: float,
+    min_len: int = 1,
 ) -> List[str]:
     sims = template_z @ _center_and_normalize(chroma, axis=0)  # (n_templates, n_cols)
     emission = np.vstack([sims, np.full((1, sims.shape[1]), _N_FLOOR)])
-    return _path_to_labels(_viterbi(emission, self_bonus=self_bonus), labels_for_state)
+    if min_len > 1:
+        path = _viterbi_min_duration(emission, switch_penalty=self_bonus, min_len=min_len)
+    else:
+        path = _viterbi(emission, self_bonus=self_bonus)
+    return _path_to_labels(path, labels_for_state)
 
 
 def _chroma(y_harm: np.ndarray, sr: int, tuning: float, hop: int) -> np.ndarray:
@@ -178,7 +248,9 @@ def _beat_sync_segments(
     edges = np.concatenate([
         [0.0], librosa.frames_to_time(frames, sr=sr, hop_length=_BEAT_CHROMA_HOP), [duration]
     ])
-    labels = _viterbi_labels(beat_chroma, template_z, labels_for_state, _BEAT_SELF_BONUS)
+    labels = _viterbi_labels(
+        beat_chroma, template_z, labels_for_state, _BEAT_SELF_BONUS, min_len=_MIN_CHORD_BEATS
+    )
 
     segs: List[tuple] = []
     for i, label in enumerate(labels):
