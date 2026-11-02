@@ -17,9 +17,14 @@ function Register-ChordDetectorTask {
         [Parameter(Mandatory)] [string] $Script
     )
 
-    $argline = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Script`""
+    # A headless console host, so no window ever appears. `powershell.exe
+    # -WindowStyle Hidden` isn't enough on Windows 11: the console gets handed
+    # to Windows Terminal, which ignores the hidden flag, so a terminal window
+    # opens at log-on and closing it kills the server. The cmd/python/node
+    # children inherit this windowless console.
+    $argline = "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$Script`""
     $action = New-ScheduledTaskAction `
-        -Execute 'powershell.exe' `
+        -Execute 'conhost.exe' `
         -Argument $argline `
         -WorkingDirectory $RepoRoot
 
