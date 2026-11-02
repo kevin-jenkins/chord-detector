@@ -4,7 +4,7 @@
  */
 
 import { ChordSegment } from "./types";
-import { parseChord, transposeChord } from "./chord";
+import { transposeChord } from "./chord";
 
 export function mergeAdjacent(chords: ChordSegment[]): ChordSegment[] {
   const out: ChordSegment[] = [];
@@ -26,62 +26,85 @@ export function relabelChord(chords: ChordSegment[], index: number, label: strin
 }
 
 /**
- * Remove a chord by folding its time into the chord before it (the first
- * chord folds into the one after). That's how a misdetected passing tone
- * should disappear: the surrounding chord was really sounding the whole time.
+ * Remove a chord by folding its time into the chord before it. That's how a
+ * misdetected passing tone should disappear: the surrounding chord was really
+ * sounding the whole time. The first chord, or one that follows a no-chord
+ * gap, folds into the chord after it instead.
  */
 export function deleteChord(chords: ChordSegment[], index: number): ChordSegment[] {
   if (chords.length <= 1 || index < 0 || index >= chords.length) return chords;
   const next = chords.map((c) => ({ ...c }));
   const [removed] = next.splice(index, 1);
-  if (index > 0) {
-    next[index - 1].end = removed.end;
-  } else {
-    next[0].start = removed.start;
+  const prev = index > 0 ? next[index - 1] : null;
+  const after = index < next.length ? next[index] : null;
+  if (prev && (prev.label !== "N" || !after || after.label === "N")) {
+    prev.end = removed.end;
+  } else if (after) {
+    after.start = removed.start;
   }
   return mergeAdjacent(next);
 }
 
+// Every root and bass note chord.ts can transpose. Anything else (Cb, E#, …)
+// would silently come out as C, so the quality can't start with # or b.
+const NOTE = "(?:[ACDFG]#?|[BDEGA]b|[BE])";
+const TYPED_CHORD = new RegExp(`^${NOTE}(?:[ac-zA-Z0-9+()][A-Za-z0-9#b+()]*)?(?:/${NOTE})?$`);
+const NO_CHORD = new Set(["", "N", "NC", "N.C.", "N/C", "-", "—"]);
+
 /**
  * Turn what the user typed (in the key currently shown, i.e. after
  * `semitones` of transposition) into a stored label in the original key.
- * Returns null when it isn't a chord. "N", "-", "—" or empty mean no chord.
+ * Returns null when it isn't a chord. "N", "NC", "-" or empty mean no chord.
  */
 export function normalizeTypedLabel(input: string, semitones: number): string | null {
-  const s = input.trim();
-  if (s === "" || s === "N" || s === "n" || s === "-" || s === "—") return "N";
-  if (!/^[A-G][#b]?[A-Za-z0-9#b+()]*(\/[A-G][#b]?)?$/.test(s)) return null;
-  const parsed = parseChord(s);
-  if (parsed.root === null) return null;
+  let s = input.trim();
+  if (NO_CHORD.has(s.toUpperCase())) return "N";
+  s = s.charAt(0).toUpperCase() + s.slice(1);
+  if (!TYPED_CHORD.test(s)) return null;
   // Transpose back to the original key, then through 0 to normalize to sharps
   // like the backend's labels.
   return transposeChord(transposeChord(s, -semitones), 0);
 }
 
-/** localStorage key for edits to one specific detected result. */
-export async function editsStorageKey(duration: number, detected: ChordSegment[]): Promise<string> {
-  const json = JSON.stringify({ d: duration, c: detected });
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(json));
+/**
+ * localStorage key for edits to one audio file. Keyed by the file's bytes, not
+ * the detected chords, so corrections survive re-analysis with other settings
+ * or a newer matcher.
+ */
+export async function editsStorageKey(audio: Blob): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", await audio.arrayBuffer());
   const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
-  return `chord-edits:v1:${hex}`;
+  return `chord-edits:v2:${hex}`;
 }
 
-export function loadEdits(key: string): ChordSegment[] | null {
+interface SavedEdits {
+  duration: number;
+  chords: ChordSegment[];
+}
+
+/**
+ * Saved edits for this file, or null. Also null if the saved timeline was for
+ * a different duration (a decoder change, say), since it wouldn't line up.
+ */
+export function loadEdits(key: string, duration: number): ChordSegment[] | null {
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : null;
+    const saved: SavedEdits = JSON.parse(raw);
+    if (typeof saved?.duration !== "number" || Math.abs(saved.duration - duration) > 0.5) return null;
+    return Array.isArray(saved.chords) && saved.chords.length > 0 ? saved.chords : null;
   } catch {
     return null;
   }
 }
 
-export function saveEdits(key: string, chords: ChordSegment[] | null): void {
+/** Returns false if the browser refused to store them. */
+export function saveEdits(key: string, duration: number, chords: ChordSegment[] | null): boolean {
   try {
-    if (chords) localStorage.setItem(key, JSON.stringify(chords));
+    if (chords) localStorage.setItem(key, JSON.stringify({ duration, chords } satisfies SavedEdits));
     else localStorage.removeItem(key);
+    return true;
   } catch {
-    // Storage blocked or full: edits still work for this session.
+    return false;
   }
 }

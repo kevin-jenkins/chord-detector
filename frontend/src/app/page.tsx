@@ -16,13 +16,19 @@ const API = "http://127.0.0.1:8010";
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
-  // Hand corrections. null = showing the detected chords as-is. The undo
-  // stack holds previous values of editedChords (null meaning "detected").
+  // Hand corrections. null = showing the detected chords as-is. The undo and
+  // redo stacks hold other values of editedChords (null meaning "detected").
   const [editedChords, setEditedChords] = useState<ChordSegment[] | null>(null);
   const [undoStack, setUndoStack] = useState<(ChordSegment[] | null)[]>([]);
+  const [redoStack, setRedoStack] = useState<(ChordSegment[] | null)[]>([]);
   const [editing, setEditing] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
+  // editsReady flips once saved edits have been looked up; editsKey stays null
+  // if the file couldn't be hashed, and edits then last only this session.
   const [editsKey, setEditsKey] = useState<string | null>(null);
+  const [editsReady, setEditsReady] = useState(false);
+  const [saveFailed, setSaveFailed] = useState(false);
+  const chordInputRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -173,23 +179,29 @@ export default function Home() {
 
   // ---- Chord corrections -------------------------------------------------
 
-  // Edits are saved per detected result (see editsStorageKey), so a reload
-  // keeps them and a re-analysis with different output starts clean.
+  // Edits are saved per audio file (see editsStorageKey), so a reload or a
+  // re-analysis of the same file brings them back.
   useEffect(() => {
     setEditedChords(null);
     setUndoStack([]);
+    setRedoStack([]);
     setSelectedIdx(null);
     setEditing(false);
     setEditsKey(null);
-    if (!result) return;
+    setEditsReady(false);
+    setSaveFailed(false);
+    if (!result || !file) return;
     let cancelled = false;
-    editsStorageKey(result.duration, result.chords).then((key) => {
-      if (cancelled) return;
-      setEditsKey(key);
-      setEditedChords(loadEdits(key));
-    });
+    editsStorageKey(file)
+      .then((key) => {
+        if (cancelled) return;
+        setEditsKey(key);
+        setEditedChords(loadEdits(key, result.duration));
+      })
+      .catch((err) => console.error("couldn't hash audio for saved edits:", err))
+      .finally(() => { if (!cancelled) setEditsReady(true); });
     return () => { cancelled = true; };
-  }, [result]);
+  }, [result, file]);
 
   const chords: ChordSegment[] = editedChords ?? result?.chords ?? [];
 
@@ -202,10 +214,18 @@ export default function Home() {
     return Array.from(time.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([l]) => l);
   }, [chords]);
 
+  const persist = (next: ChordSegment[] | null) => {
+    setSaveFailed(!(editsKey && result && saveEdits(editsKey, result.duration, next)));
+  };
+
   const commitEdit = (next: ChordSegment[]) => {
+    // Deleting the only chord, or relabeling to the same thing, changes nothing
+    // and shouldn't cost an undo step.
+    if (JSON.stringify(next) === JSON.stringify(chords)) return;
     setUndoStack((s) => [...s, editedChords]);
+    setRedoStack([]);
     setEditedChords(next);
-    if (editsKey) saveEdits(editsKey, next);
+    persist(next);
   };
 
   const applyLabel = (label: string) => {
@@ -215,7 +235,8 @@ export default function Home() {
     commitEdit(next);
     // Merging with a neighbor can shift indices; keep the same moment selected.
     const mid = (sel.start + sel.end) / 2;
-    setSelectedIdx(next.findIndex((c) => mid >= c.start && mid < c.end));
+    const idx = next.findIndex((c) => mid >= c.start && mid < c.end);
+    setSelectedIdx(idx >= 0 ? idx : null);
   };
 
   const deleteSelected = () => {
@@ -228,39 +249,65 @@ export default function Home() {
     if (undoStack.length === 0) return;
     const prev = undoStack[undoStack.length - 1];
     setUndoStack((s) => s.slice(0, -1));
+    setRedoStack((s) => [...s, editedChords]);
     setEditedChords(prev);
     setSelectedIdx(null);
-    if (editsKey) saveEdits(editsKey, prev);
+    persist(prev);
+  };
+
+  const redoEdit = () => {
+    if (redoStack.length === 0) return;
+    const next = redoStack[redoStack.length - 1];
+    setRedoStack((s) => s.slice(0, -1));
+    setUndoStack((s) => [...s, editedChords]);
+    setEditedChords(next);
+    setSelectedIdx(null);
+    persist(next);
   };
 
   const revertEdits = () => {
     if (!window.confirm("Discard all your chord edits for this song?")) return;
     setEditedChords(null);
     setUndoStack([]);
+    setRedoStack([]);
     setSelectedIdx(null);
-    if (editsKey) saveEdits(editsKey, null);
+    persist(null);
   };
 
-  // Delete removes the selected chord, Esc deselects, Ctrl/Cmd+Z undoes —
-  // except while typing in a field.
+  // Delete removes the selected chord, typing a chord name starts renaming it,
+  // Esc deselects, Ctrl/Cmd+Z undoes, Ctrl+Shift+Z or Ctrl+Y redoes — except
+  // while typing in a field. Held keys don't repeat edits. The listener reads
+  // the latest handlers through a ref so it only re-binds when editing toggles.
+  const onEditKey = (e: KeyboardEvent) => {
+    const el = e.target as HTMLElement | null;
+    if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT")) return;
+    const mod = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+    if (e.key === "Delete" && selectedIdx !== null) {
+      e.preventDefault();
+      if (!e.repeat) deleteSelected();
+    } else if (e.key === "Escape") {
+      setSelectedIdx(null);
+    } else if (mod && (key === "y" || (key === "z" && e.shiftKey))) {
+      e.preventDefault();
+      if (!e.repeat) redoEdit();
+    } else if (mod && key === "z") {
+      e.preventDefault();
+      if (!e.repeat) undoEdit();
+    } else if (!mod && !e.altKey && /^[a-gn]$/.test(key) && selectedIdx !== null) {
+      // Focus moves before the key's character is inserted, so it lands in
+      // the (select-all-on-focus) chord field and replaces its text.
+      chordInputRef.current?.focus();
+    }
+  };
+  const onEditKeyRef = useRef(onEditKey);
+  onEditKeyRef.current = onEditKey;
   useEffect(() => {
     if (!editing) return;
-    const onKey = (e: KeyboardEvent) => {
-      const el = e.target as HTMLElement | null;
-      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT")) return;
-      if ((e.key === "Delete" || e.key === "Backspace") && selectedIdx !== null) {
-        e.preventDefault();
-        deleteSelected();
-      } else if (e.key === "Escape") {
-        setSelectedIdx(null);
-      } else if (e.key === "z" && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        undoEdit();
-      }
-    };
+    const onKey = (e: KeyboardEvent) => onEditKeyRef.current(e);
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+  }, [editing]);
 
   // ---- Wavesurfer setup --------------------------------------------------
 
@@ -800,24 +847,32 @@ export default function Home() {
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
             <button
               onClick={() => { setEditing((e) => !e); setSelectedIdx(null); }}
+              disabled={!editsReady}
               style={editing ? { borderColor: "var(--accent)", color: "var(--accent-bright)" } : undefined}
             >
               {editing ? "Done editing" : "Edit chords"}
             </button>
             {editing && (
-              <button onClick={undoEdit} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">
-                Undo
-              </button>
+              <>
+                <button onClick={undoEdit} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">
+                  Undo
+                </button>
+                <button onClick={redoEdit} disabled={redoStack.length === 0} title="Redo (Ctrl+Shift+Z)">
+                  Redo
+                </button>
+              </>
             )}
             {editedChords && (
               <button onClick={revertEdits}>Revert to detected</button>
             )}
-            <span style={{ color: "var(--muted)", fontSize: 12 }}>
-              {editing
-                ? "Click a chord to change or delete it. Delete removes the selected chord."
-                : editedChords
-                  ? "Showing your edits. They're saved in this browser."
-                  : ""}
+            <span style={{ color: saveFailed ? "#e06c75" : "var(--muted)", fontSize: 12 }}>
+              {saveFailed
+                ? "Couldn't save edits in this browser. They'll be lost when you reload."
+                : editing
+                  ? "Click a chord, then type a new name or press Delete to remove it."
+                  : editedChords
+                    ? "Showing your edits. They're saved in this browser."
+                    : ""}
             </span>
           </div>
 
@@ -838,6 +893,7 @@ export default function Home() {
               semitones={semitones}
               quickPicks={quickPicks}
               canDelete={chords.length > 1}
+              inputRef={chordInputRef}
               onApply={applyLabel}
               onDelete={deleteSelected}
               onClose={() => setSelectedIdx(null)}

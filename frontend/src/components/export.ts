@@ -139,7 +139,7 @@ function renderLyricBar(
 
   let out = "";
   const leading = chordAt(bar.start, chords);
-  if (leading) {
+  if (leading && leading !== "N") {
     out += `[${display(leading, semitones)}]`;
   }
 

@@ -11,6 +11,8 @@ interface Props {
   /** Stored (untransposed) labels offered as one-click replacements. */
   quickPicks: string[];
   canDelete: boolean;
+  /** Lets the page focus the field when the user starts typing a chord name. */
+  inputRef?: React.Ref<HTMLInputElement>;
   onApply: (storedLabel: string) => void;
   onDelete: () => void;
   onClose: () => void;
@@ -20,7 +22,7 @@ const fmtTime = (s: number) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padS
 
 /** Inline editor for one selected chord: retype it, pick a replacement, or delete it. */
 export default function ChordEditBar({
-  chord, semitones, quickPicks, canDelete, onApply, onDelete, onClose,
+  chord, semitones, quickPicks, canDelete, inputRef, onApply, onDelete, onClose,
 }: Props) {
   const shown = (label: string) =>
     label === "N" ? "N" : formatChord(parseChord(transposeChord(label, semitones)));
@@ -28,7 +30,7 @@ export default function ChordEditBar({
   const [invalid, setInvalid] = useState(false);
 
   // No auto-focus on selection: the page's Delete-key shortcut only works
-  // while focus is outside this text box.
+  // while focus is outside this text box. Typing a letter focuses it.
   useEffect(() => {
     setText(shown(chord.label));
     setInvalid(false);
@@ -62,6 +64,7 @@ export default function ChordEditBar({
         {fmtTime(chord.start)} · {(chord.end - chord.start).toFixed(1)}s
       </span>
       <input
+        ref={inputRef}
         value={text}
         aria-label="Chord"
         onFocus={(e) => e.target.select()}
@@ -98,7 +101,7 @@ export default function ChordEditBar({
       <button
         onClick={onDelete}
         disabled={!canDelete}
-        title="Remove this chord; the chord before it takes over its time"
+        title="Remove this chord (Delete); the chord before it takes over its time"
         style={{ color: "#e06c75" }}
       >
         Delete
