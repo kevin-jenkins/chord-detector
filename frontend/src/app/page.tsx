@@ -5,7 +5,9 @@ import WaveSurfer from "wavesurfer.js";
 import ChordTimeline from "@/components/ChordTimeline";
 import ChordEditBar from "@/components/ChordEditBar";
 import { AnalysisResult, ChordSegment } from "@/components/types";
-import { deleteChord, editsStorageKey, loadEdits, relabelChord, saveEdits } from "@/components/chordEdits";
+import {
+  deleteChord, editsStorageKey, insertChord, loadEdits, relabelChord, saveEdits, snapToBeat,
+} from "@/components/chordEdits";
 import { transposeKey } from "@/components/chord";
 import { exportChordPro, downloadText } from "@/components/export";
 import { exportTab } from "@/components/tabExport";
@@ -23,6 +25,8 @@ export default function Home() {
   const [redoStack, setRedoStack] = useState<(ChordSegment[] | null)[]>([]);
   const [editing, setEditing] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
+  // Where a chord is being inserted (seconds), while the edit bar asks which one.
+  const [insertAt, setInsertAt] = useState<number | null>(null);
   // editsReady flips once saved edits have been looked up; editsKey stays null
   // if the file couldn't be hashed, and edits then last only this session.
   const [editsKey, setEditsKey] = useState<string | null>(null);
@@ -186,6 +190,7 @@ export default function Home() {
     setUndoStack([]);
     setRedoStack([]);
     setSelectedIdx(null);
+    setInsertAt(null);
     setEditing(false);
     setEditsKey(null);
     setEditsReady(false);
@@ -239,6 +244,40 @@ export default function Home() {
     setSelectedIdx(idx >= 0 ? idx : null);
   };
 
+  // Insert at the playhead, snapped to the nearest beat since a pause by ear
+  // lands a little late. Asks wavesurfer directly: currentTime lags a click
+  // on the waveform by an event.
+  const startInsert = () => {
+    if (!result) return;
+    const playhead = waveSurferRef.current?.getCurrentTime() ?? currentTime;
+    const t = snapToBeat(playhead, result.beats);
+    if (!chords.some((c) => t >= c.start && t < c.end)) return;
+    setSelectedIdx(null);
+    setInsertAt(t);
+  };
+
+  const applyInsert = (label: string) => {
+    if (insertAt === null) return;
+    const next = insertChord(chords, insertAt, label);
+    commitEdit(next);
+    const idx = next.findIndex((c) => insertAt >= c.start && insertAt < c.end);
+    setInsertAt(null);
+    setSelectedIdx(idx >= 0 ? idx : null);
+  };
+
+  // The stretch an insert would take over: from insertAt to the end of the
+  // chord it splits.
+  const insertSpan = (() => {
+    if (insertAt === null) return null;
+    const c = chords.find((c) => insertAt >= c.start && insertAt < c.end);
+    return c ? { start: insertAt, end: c.end, label: c.label } : null;
+  })();
+
+  const selectChord = (i: number) => {
+    setInsertAt(null);
+    setSelectedIdx(i);
+  };
+
   const deleteSelected = () => {
     if (selectedIdx === null) return;
     commitEdit(deleteChord(chords, selectedIdx));
@@ -275,9 +314,10 @@ export default function Home() {
   };
 
   // Delete removes the selected chord, typing a chord name starts renaming it,
-  // Esc deselects, Ctrl/Cmd+Z undoes, Ctrl+Shift+Z or Ctrl+Y redoes — except
-  // while typing in a field. Held keys don't repeat edits. The listener reads
-  // the latest handlers through a ref so it only re-binds when editing toggles.
+  // I or Insert inserts a chord at the playhead, Esc deselects, Ctrl/Cmd+Z
+  // undoes, Ctrl+Shift+Z or Ctrl+Y redoes — except while typing in a field.
+  // Held keys don't repeat edits. The listener reads the latest handlers
+  // through a ref so it only re-binds when editing toggles.
   const onEditKey = (e: KeyboardEvent) => {
     const el = e.target as HTMLElement | null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT")) return;
@@ -288,6 +328,10 @@ export default function Home() {
       if (!e.repeat) deleteSelected();
     } else if (e.key === "Escape") {
       setSelectedIdx(null);
+      setInsertAt(null);
+    } else if (!mod && !e.altKey && (key === "i" || e.key === "Insert")) {
+      e.preventDefault();
+      if (!e.repeat) startInsert();
     } else if (mod && (key === "y" || (key === "z" && e.shiftKey))) {
       e.preventDefault();
       if (!e.repeat) redoEdit();
@@ -846,7 +890,7 @@ export default function Home() {
 
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
             <button
-              onClick={() => { setEditing((e) => !e); setSelectedIdx(null); }}
+              onClick={() => { setEditing((e) => !e); setSelectedIdx(null); setInsertAt(null); }}
               disabled={!editsReady}
               style={editing ? { borderColor: "var(--accent)", color: "var(--accent-bright)" } : undefined}
             >
@@ -854,6 +898,12 @@ export default function Home() {
             </button>
             {editing && (
               <>
+                <button
+                  onClick={startInsert}
+                  title="Insert a chord change at the playhead, snapped to the nearest beat (I)"
+                >
+                  Insert chord
+                </button>
                 <button onClick={undoEdit} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">
                   Undo
                 </button>
@@ -869,7 +919,7 @@ export default function Home() {
               {saveFailed
                 ? "Couldn't save edits in this browser. They'll be lost when you reload."
                 : editing
-                  ? "Click a chord, then type a new name or press Delete to remove it."
+                  ? "Click a chord to rename or delete it. To add a missed change, put the playhead there and press Insert chord."
                   : editedChords
                     ? "Showing your edits. They're saved in this browser."
                     : ""}
@@ -884,10 +934,24 @@ export default function Home() {
             onSeek={seek}
             editing={editing}
             selectedIndex={selectedIdx}
-            onSelect={setSelectedIdx}
+            onSelect={selectChord}
           />
 
-          {editing && selectedIdx !== null && chords[selectedIdx] && (
+          {editing && insertSpan && (
+            <ChordEditBar
+              mode="insert"
+              chord={insertSpan}
+              semitones={semitones}
+              quickPicks={quickPicks}
+              canDelete={false}
+              inputRef={chordInputRef}
+              onApply={applyInsert}
+              onDelete={() => {}}
+              onClose={() => setInsertAt(null)}
+            />
+          )}
+
+          {editing && !insertSpan && selectedIdx !== null && chords[selectedIdx] && (
             <ChordEditBar
               chord={chords[selectedIdx]}
               semitones={semitones}

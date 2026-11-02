@@ -2,7 +2,8 @@
 import { test } from "node:test";
 import { deepStrictEqual as eq, strictEqual as is, notStrictEqual as isnt } from "node:assert";
 import {
-  deleteChord, editsStorageKey, mergeAdjacent, normalizeTypedLabel, relabelChord,
+  deleteChord, editsStorageKey, insertChord, mergeAdjacent, normalizeTypedLabel, relabelChord,
+  snapToBeat,
 } from "./chordEdits";
 
 const seg = (label: string, start: number, end: number) => ({ label, start, end });
@@ -48,10 +49,43 @@ test("relabel changes and merges with an identical neighbor", () => {
   is(relabelChord(song, 4, "Am")[4].label, "Am");
 });
 
+test("insert splits the chord at the given time", () => {
+  eq(insertChord(song, 4, "B").slice(2, 5), [seg("C#m", 3, 4), seg("B", 4, 5), seg("E", 5, 6)]);
+});
+
+test("insert twice puts a short missed chord in the middle of a long one", () => {
+  const long = [seg("E", 0, 8)];
+  eq(insertChord(insertChord(long, 4, "A"), 6, "E"), [seg("E", 0, 4), seg("A", 4, 6), seg("E", 6, 8)]);
+});
+
+test("insert at a chord's start relabels it instead of leaving a sliver", () => {
+  eq(insertChord(song, 5.01, "F#m")[3], seg("F#m", 5, 6));
+});
+
+test("insert merges with a matching neighbor and is a no-op for the same chord", () => {
+  eq(insertChord(song, 2.5, "C#m").slice(0, 1), [seg("C#m", 0, 2)]);
+  eq(insertChord(song, 2.5, "C#m")[1], seg("G#m", 2, 2.5));
+  eq(insertChord(song, 4, "C#m"), song);
+});
+
+test("insert outside the song changes nothing", () => {
+  is(insertChord(song, 9, "D"), song);
+  is(insertChord(song, -1, "D"), song);
+});
+
+test("snap moves to the nearest beat within half a second", () => {
+  const beats = [0.5, 1.0, 1.5, 2.0];
+  is(snapToBeat(1.2, beats), 1.0);
+  is(snapToBeat(1.3, beats), 1.5);
+  is(snapToBeat(3.0, beats), 3.0);
+  is(snapToBeat(1.2, []), 1.2);
+});
+
 test("inputs are not mutated", () => {
   const copy = JSON.parse(JSON.stringify(song));
   deleteChord(song, 2);
   relabelChord(song, 2, "D");
+  insertChord(song, 4, "B");
   mergeAdjacent(song);
   eq(song, copy);
 });

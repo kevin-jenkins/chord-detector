@@ -45,6 +45,46 @@ export function deleteChord(chords: ChordSegment[], index: number): ChordSegment
   return mergeAdjacent(next);
 }
 
+// A split closer than this to a chord's start just relabels that chord rather
+// than leaving a sliver of the old one.
+const MIN_SPLIT = 0.05;
+
+/**
+ * Insert a chord change at `time`: the chord sounding there is split, and
+ * `label` runs from `time` to where that chord ended. A missed short chord is
+ * two inserts, one at its start and one back to the old chord at its end.
+ */
+export function insertChord(chords: ChordSegment[], time: number, label: string): ChordSegment[] {
+  const index = chords.findIndex((c) => time >= c.start && time < c.end);
+  if (index < 0) return chords;
+  const c = chords[index];
+  if (time - c.start < MIN_SPLIT) return relabelChord(chords, index, label);
+  const next = [
+    ...chords.slice(0, index),
+    { ...c, end: time },
+    { start: time, end: c.end, label },
+    ...chords.slice(index + 1),
+  ];
+  return mergeAdjacent(next);
+}
+
+/**
+ * Move a time picked by ear (the playhead) onto the nearest detected beat, as
+ * the detector itself does, unless no beat is within half a second.
+ */
+export function snapToBeat(time: number, beats: number[]): number {
+  let best = time;
+  let bestDist = 0.5;
+  for (const b of beats) {
+    const d = Math.abs(b - time);
+    if (d <= bestDist) {
+      best = b;
+      bestDist = d;
+    }
+  }
+  return best;
+}
+
 // Every root and bass note chord.ts can transpose. Anything else (Cb, E#, …)
 // would silently come out as C, so the quality can't start with # or b.
 const NOTE = "(?:[ACDFG]#?|[BDEGA]b|[BE])";
