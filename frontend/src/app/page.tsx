@@ -6,9 +6,10 @@ import ChordTimeline from "@/components/ChordTimeline";
 import ChordEditBar from "@/components/ChordEditBar";
 import { AnalysisResult, ChordSegment } from "@/components/types";
 import {
-  deleteChord, editsStorageKey, insertChord, loadEdits, relabelChord, saveEdits, snapToBeat,
+  deleteChord, editsStorageKey, insertChord, loadEdits, nudgeToBeat, PENDING_LABEL, relabelChord,
+  saveEdits, snapToBeat,
 } from "@/components/chordEdits";
-import { transposeKey } from "@/components/chord";
+import { formatChord, parseChord, transposeChord, transposeKey } from "@/components/chord";
 import { exportChordPro, downloadText } from "@/components/export";
 import { exportTab } from "@/components/tabExport";
 
@@ -265,16 +266,47 @@ export default function Home() {
     setSelectedIdx(idx >= 0 ? idx : null);
   };
 
-  // The stretch an insert would take over: from insertAt to the end of the
-  // chord it splits.
-  const insertSpan = (() => {
-    if (insertAt === null) return null;
-    const c = chords.find((c) => insertAt >= c.start && insertAt < c.end);
-    return c ? { start: insertAt, end: c.end, label: c.label } : null;
+  // While inserting, the strip previews the result with a "?" block, so it's
+  // clear which chord gets split (or wholly replaced) before anything changes.
+  const insertPreview = (() => {
+    if (insertAt === null || !result) return null;
+    const host = chords.find((c) => insertAt >= c.start && insertAt < c.end);
+    const after = insertChord(chords, insertAt, PENDING_LABEL);
+    const index = after.findIndex((c) => c.label === PENDING_LABEL);
+    if (!host || index < 0) return null;
+    const pending = after[index];
+    const name = (l: string) => (l === "N" ? "no chord" : formatChord(parseChord(transposeChord(l, semitones))));
+    const note = after.length > chords.length
+      ? `New chord ${formatTimeTenths(pending.start)}–${formatTimeTenths(pending.end)}. ` +
+        `${name(host.label)} keeps ${formatTimeTenths(host.start)}–${formatTimeTenths(pending.start)}.`
+      : `Replaces all of ${name(host.label)} (${formatTimeTenths(pending.start)}–${formatTimeTenths(pending.end)}). ` +
+        `Use Beat ▶ to split it instead.`;
+    const canGo = (dir: -1 | 1) => {
+      const t = nudgeToBeat(insertAt, result.beats, dir, result.duration);
+      return t !== null && chords.some((c) => t >= c.start && t < c.end);
+    };
+    return {
+      chords: after,
+      index,
+      span: { start: pending.start, end: pending.end, label: host.label },
+      note,
+      canNudge: { earlier: canGo(-1), later: canGo(1) },
+    };
   })();
 
+  const nudgeInsert = (dir: -1 | 1) => {
+    if (insertAt === null || !result) return;
+    const t = nudgeToBeat(insertAt, result.beats, dir, result.duration);
+    if (t !== null) setInsertAt(t);
+  };
+
+  // Strip indices refer to the preview while inserting, so a click there
+  // just cancels the insert.
   const selectChord = (i: number) => {
-    setInsertAt(null);
+    if (insertAt !== null) {
+      setInsertAt(null);
+      return;
+    }
     setSelectedIdx(i);
   };
 
@@ -927,7 +959,8 @@ export default function Home() {
           </div>
 
           <ChordTimeline
-            chords={chords}
+            chords={insertPreview?.chords ?? chords}
+            pendingIndex={insertPreview?.index ?? null}
             duration={result.duration}
             currentTime={currentTime}
             semitones={semitones}
@@ -937,10 +970,13 @@ export default function Home() {
             onSelect={selectChord}
           />
 
-          {editing && insertSpan && (
+          {editing && insertPreview && (
             <ChordEditBar
               mode="insert"
-              chord={insertSpan}
+              chord={insertPreview.span}
+              insertNote={insertPreview.note}
+              onNudge={nudgeInsert}
+              canNudge={insertPreview.canNudge}
               semitones={semitones}
               quickPicks={quickPicks}
               canDelete={false}
@@ -951,7 +987,7 @@ export default function Home() {
             />
           )}
 
-          {editing && !insertSpan && selectedIdx !== null && chords[selectedIdx] && (
+          {editing && !insertPreview && selectedIdx !== null && chords[selectedIdx] && (
             <ChordEditBar
               chord={chords[selectedIdx]}
               semitones={semitones}
@@ -973,4 +1009,8 @@ function formatTime(s: number): string {
   const m = Math.floor(s / 60);
   const sec = Math.floor(s - m * 60);
   return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+function formatTimeTenths(s: number): string {
+  return `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
 }

@@ -85,6 +85,26 @@ export function snapToBeat(time: number, beats: number[]): number {
   return best;
 }
 
+/**
+ * The beat before (direction -1) or after (+1) `time`, for nudging an insert
+ * point. Steps a quarter second when there are no beats; null at either end.
+ */
+export function nudgeToBeat(time: number, beats: number[], direction: -1 | 1, duration: number): number | null {
+  const EPS = 0.01;
+  let t: number | undefined;
+  if (beats.length === 0) {
+    t = time + direction * 0.25;
+  } else if (direction < 0) {
+    t = [...beats].reverse().find((b) => b < time - EPS);
+  } else {
+    t = beats.find((b) => b > time + EPS);
+  }
+  return t !== undefined && t > 0 && t < duration ? t : null;
+}
+
+// Label shown on the strip for an insert whose chord hasn't been picked yet.
+export const PENDING_LABEL = "?";
+
 // Every root and bass note chord.ts can transpose. Anything else (Cb, E#, …)
 // would silently come out as C, so the quality can't start with # or b.
 const NOTE = "(?:[ACDFG]#?|[BDEGA]b|[BE])";

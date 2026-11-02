@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { deepStrictEqual as eq, strictEqual as is, notStrictEqual as isnt } from "node:assert";
 import {
   deleteChord, editsStorageKey, insertChord, mergeAdjacent, normalizeTypedLabel, relabelChord,
-  snapToBeat,
+  nudgeToBeat, snapToBeat,
 } from "./chordEdits";
 
 const seg = (label: string, start: number, end: number) => ({ label, start, end });
@@ -79,6 +79,16 @@ test("snap moves to the nearest beat within half a second", () => {
   is(snapToBeat(1.3, beats), 1.5);
   is(snapToBeat(3.0, beats), 3.0);
   is(snapToBeat(1.2, []), 1.2);
+});
+
+test("nudge steps one beat either way and stops at the ends", () => {
+  const beats = [0.5, 1.0, 1.5, 2.0];
+  is(nudgeToBeat(1.0, beats, 1, 3), 1.5);
+  is(nudgeToBeat(1.0, beats, -1, 3), 0.5);
+  is(nudgeToBeat(1.2, beats, -1, 3), 1.0);
+  is(nudgeToBeat(0.5, beats, -1, 3), null);
+  is(nudgeToBeat(2.0, beats, 1, 3), null);
+  is(nudgeToBeat(1.0, [], 1, 3), 1.25);
 });
 
 test("inputs are not mutated", () => {

@@ -9,6 +9,10 @@ interface Props {
   /** In insert mode, the span the new chord would take over (label = the chord it splits). */
   chord: ChordSegment;
   mode?: "edit" | "insert";
+  /** Insert mode: what the insert will do, and moving it a beat either way. */
+  insertNote?: string;
+  onNudge?: (direction: -1 | 1) => void;
+  canNudge?: { earlier: boolean; later: boolean };
   semitones: number;
   /** Stored (untransposed) labels offered as one-click replacements. */
   quickPicks: string[];
@@ -27,7 +31,7 @@ const fmtTime = (s: number) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padS
  * delete it. In insert mode it names the chord to insert instead.
  */
 export default function ChordEditBar({
-  chord, mode = "edit", semitones, quickPicks, canDelete, inputRef, onApply, onDelete, onClose,
+  chord, mode = "edit", insertNote, onNudge, canNudge, semitones, quickPicks, canDelete, inputRef, onApply, onDelete, onClose,
 }: Props) {
   const inserting = mode === "insert";
   const shown = (label: string) =>
@@ -40,13 +44,17 @@ export default function ChordEditBar({
 
   // No auto-focus on selection: the page's Delete-key shortcut only works
   // while focus is outside this text box. Typing a letter focuses it.
-  // Inserting has no Delete, so it goes straight to typing.
+  // Inserting has no Delete, so it goes straight to typing, and nudging the
+  // insert point keeps what's been typed.
   useEffect(() => {
     setText(initialText());
     setInvalid(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inserting ? null : chord.start, inserting ? null : chord.label, semitones, inserting]);
+  useEffect(() => {
     if (inserting) fieldRef.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chord.start, chord.label, semitones, inserting]);
+  }, [inserting, chord.start]);
 
   const apply = (typed: string) => {
     const label = normalizeTypedLabel(typed, semitones);
@@ -71,9 +79,19 @@ export default function ChordEditBar({
         borderRadius: 8,
       }}
     >
+      {inserting && onNudge && (
+        <>
+          <button onClick={() => onNudge(-1)} disabled={!canNudge?.earlier} title="Start one beat earlier (← in an empty box)">
+            ◀ Beat
+          </button>
+          <button onClick={() => onNudge(1)} disabled={!canNudge?.later} title="Start one beat later (→ in an empty box)">
+            Beat ▶
+          </button>
+        </>
+      )}
       <span style={{ color: "var(--muted)", fontSize: 12 }}>
         {inserting
-          ? `Insert at ${fmtTime(chord.start)}, replacing ${shown(chord.label)} until ${fmtTime(chord.end)}`
+          ? insertNote
           : `${fmtTime(chord.start)} · ${(chord.end - chord.start).toFixed(1)}s`}
       </span>
       <input
@@ -86,6 +104,11 @@ export default function ChordEditBar({
         onKeyDown={(e) => {
           if (e.key === "Enter") apply(text);
           if (e.key === "Escape") onClose();
+          if (inserting && onNudge && text === "" && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+            e.preventDefault();
+            const dir = e.key === "ArrowLeft" ? -1 : 1;
+            if (dir < 0 ? canNudge?.earlier : canNudge?.later) onNudge(dir);
+          }
         }}
         style={{
           width: 90,

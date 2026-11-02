@@ -14,6 +14,8 @@ interface Props {
   editing?: boolean;
   selectedIndex?: number | null;
   onSelect?: (index: number) => void;
+  /** Block that previews an insert still waiting for its chord. */
+  pendingIndex?: number | null;
 }
 
 /**
@@ -31,6 +33,7 @@ export default function ChordTimeline({
   editing = false,
   selectedIndex = null,
   onSelect,
+  pendingIndex = null,
 }: Props) {
   const stripRef = useRef<HTMLDivElement>(null);
   const activeRef = useRef<HTMLDivElement>(null);
@@ -135,6 +138,7 @@ export default function ChordTimeline({
           const isActive = i === activeIdx;
           const isSilent = c.label === "N";
           const isSelected = editing && i === selectedIndex;
+          const isPending = i === pendingIndex;
 
           return (
             <div
@@ -152,7 +156,9 @@ export default function ChordTimeline({
                 alignItems: "center",
                 background: isActive ? "var(--chord-active)" : "var(--chord-bg)",
                 border: `1px solid ${isActive ? "var(--accent)" : "var(--border)"}`,
-                outline: isSelected ? "2px solid var(--accent-bright)" : "none",
+                outline: isPending
+                  ? "2px dashed var(--accent-bright)"
+                  : isSelected ? "2px solid var(--accent-bright)" : "none",
                 outlineOffset: 1,
                 borderRadius: 6,
                 padding: "10px 8px",
@@ -169,7 +175,7 @@ export default function ChordTimeline({
                   color: isActive ? "var(--accent-bright)" : "var(--text)",
                 }}
               >
-                {isSilent ? "—" : displayLabel(c.label)}
+                {isPending ? "?" : isSilent ? "—" : displayLabel(c.label)}
               </div>
               <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
                 {dur.toFixed(1)}s
