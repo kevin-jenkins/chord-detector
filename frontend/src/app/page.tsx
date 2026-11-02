@@ -1,10 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
 import ChordTimeline from "@/components/ChordTimeline";
-import { AnalysisResult } from "@/components/types";
-import { transposeKey } from "@/components/chord";
+import ChordEditBar from "@/components/ChordEditBar";
+import { AnalysisResult, ChordSegment } from "@/components/types";
+import {
+  deleteChord, editsStorageKey, insertChord, loadEdits, nudgeToBeat, PENDING_LABEL, relabelChord,
+  saveEdits, snapToBeat,
+} from "@/components/chordEdits";
+import { formatChord, parseChord, transposeChord, transposeKey } from "@/components/chord";
 import { exportChordPro, downloadText } from "@/components/export";
 import { exportTab } from "@/components/tabExport";
 
@@ -14,6 +19,21 @@ const API = "http://127.0.0.1:8010";
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  // Hand corrections. null = showing the detected chords as-is. The undo and
+  // redo stacks hold other values of editedChords (null meaning "detected").
+  const [editedChords, setEditedChords] = useState<ChordSegment[] | null>(null);
+  const [undoStack, setUndoStack] = useState<(ChordSegment[] | null)[]>([]);
+  const [redoStack, setRedoStack] = useState<(ChordSegment[] | null)[]>([]);
+  const [editing, setEditing] = useState(false);
+  const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
+  // Where a chord is being inserted (seconds), while the edit bar asks which one.
+  const [insertAt, setInsertAt] = useState<number | null>(null);
+  // editsReady flips once saved edits have been looked up; editsKey stays null
+  // if the file couldn't be hashed, and edits then last only this session.
+  const [editsKey, setEditsKey] = useState<string | null>(null);
+  const [editsReady, setEditsReady] = useState(false);
+  const [saveFailed, setSaveFailed] = useState(false);
+  const chordInputRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -162,6 +182,209 @@ export default function Home() {
     }
   };
 
+  // ---- Chord corrections -------------------------------------------------
+
+  // Edits are saved per audio file (see editsStorageKey), so a reload or a
+  // re-analysis of the same file brings them back.
+  useEffect(() => {
+    setEditedChords(null);
+    setUndoStack([]);
+    setRedoStack([]);
+    setSelectedIdx(null);
+    setInsertAt(null);
+    setEditing(false);
+    setEditsKey(null);
+    setEditsReady(false);
+    setSaveFailed(false);
+    if (!result || !file) return;
+    let cancelled = false;
+    editsStorageKey(file)
+      .then((key) => {
+        if (cancelled) return;
+        setEditsKey(key);
+        setEditedChords(loadEdits(key, result.duration));
+      })
+      .catch((err) => console.error("couldn't hash audio for saved edits:", err))
+      .finally(() => { if (!cancelled) setEditsReady(true); });
+    return () => { cancelled = true; };
+  }, [result, file]);
+
+  const chords: ChordSegment[] = editedChords ?? result?.chords ?? [];
+
+  // Chords already in the song, most-used first, as one-click replacements.
+  const quickPicks = useMemo(() => {
+    const time = new Map<string, number>();
+    for (const c of chords) {
+      if (c.label !== "N") time.set(c.label, (time.get(c.label) ?? 0) + (c.end - c.start));
+    }
+    return Array.from(time.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([l]) => l);
+  }, [chords]);
+
+  const persist = (next: ChordSegment[] | null) => {
+    setSaveFailed(!(editsKey && result && saveEdits(editsKey, result.duration, next)));
+  };
+
+  const commitEdit = (next: ChordSegment[]) => {
+    // Deleting the only chord, or relabeling to the same thing, changes nothing
+    // and shouldn't cost an undo step.
+    if (JSON.stringify(next) === JSON.stringify(chords)) return;
+    setUndoStack((s) => [...s, editedChords]);
+    setRedoStack([]);
+    setEditedChords(next);
+    persist(next);
+  };
+
+  const applyLabel = (label: string) => {
+    if (selectedIdx === null) return;
+    const sel = chords[selectedIdx];
+    const next = relabelChord(chords, selectedIdx, label);
+    commitEdit(next);
+    // Merging with a neighbor can shift indices; keep the same moment selected.
+    const mid = (sel.start + sel.end) / 2;
+    const idx = next.findIndex((c) => mid >= c.start && mid < c.end);
+    setSelectedIdx(idx >= 0 ? idx : null);
+  };
+
+  // Insert at the playhead, snapped to the nearest beat since a pause by ear
+  // lands a little late. Asks wavesurfer directly: currentTime lags a click
+  // on the waveform by an event.
+  const startInsert = () => {
+    if (!result) return;
+    const playhead = waveSurferRef.current?.getCurrentTime() ?? currentTime;
+    const t = snapToBeat(playhead, result.beats);
+    if (!chords.some((c) => t >= c.start && t < c.end)) return;
+    setSelectedIdx(null);
+    setInsertAt(t);
+  };
+
+  const applyInsert = (label: string) => {
+    if (insertAt === null) return;
+    const next = insertChord(chords, insertAt, label);
+    commitEdit(next);
+    const idx = next.findIndex((c) => insertAt >= c.start && insertAt < c.end);
+    setInsertAt(null);
+    setSelectedIdx(idx >= 0 ? idx : null);
+  };
+
+  // While inserting, the strip previews the result with a "?" block, so it's
+  // clear which chord gets split (or wholly replaced) before anything changes.
+  const insertPreview = (() => {
+    if (insertAt === null || !result) return null;
+    const host = chords.find((c) => insertAt >= c.start && insertAt < c.end);
+    const after = insertChord(chords, insertAt, PENDING_LABEL);
+    const index = after.findIndex((c) => c.label === PENDING_LABEL);
+    if (!host || index < 0) return null;
+    const pending = after[index];
+    const name = (l: string) => (l === "N" ? "no chord" : formatChord(parseChord(transposeChord(l, semitones))));
+    const note = after.length > chords.length
+      ? `New chord ${formatTimeTenths(pending.start)}–${formatTimeTenths(pending.end)}. ` +
+        `${name(host.label)} keeps ${formatTimeTenths(host.start)}–${formatTimeTenths(pending.start)}.`
+      : `Replaces all of ${name(host.label)} (${formatTimeTenths(pending.start)}–${formatTimeTenths(pending.end)}). ` +
+        `Use Beat ▶ to split it instead.`;
+    const canGo = (dir: -1 | 1) => {
+      const t = nudgeToBeat(insertAt, result.beats, dir, result.duration);
+      return t !== null && chords.some((c) => t >= c.start && t < c.end);
+    };
+    return {
+      chords: after,
+      index,
+      span: { start: pending.start, end: pending.end, label: host.label },
+      note,
+      canNudge: { earlier: canGo(-1), later: canGo(1) },
+    };
+  })();
+
+  const nudgeInsert = (dir: -1 | 1) => {
+    if (insertAt === null || !result) return;
+    const t = nudgeToBeat(insertAt, result.beats, dir, result.duration);
+    if (t !== null) setInsertAt(t);
+  };
+
+  // Strip indices refer to the preview while inserting, so a click there
+  // just cancels the insert.
+  const selectChord = (i: number) => {
+    if (insertAt !== null) {
+      setInsertAt(null);
+      return;
+    }
+    setSelectedIdx(i);
+  };
+
+  const deleteSelected = () => {
+    if (selectedIdx === null) return;
+    commitEdit(deleteChord(chords, selectedIdx));
+    setSelectedIdx(null);
+  };
+
+  const undoEdit = () => {
+    if (undoStack.length === 0) return;
+    const prev = undoStack[undoStack.length - 1];
+    setUndoStack((s) => s.slice(0, -1));
+    setRedoStack((s) => [...s, editedChords]);
+    setEditedChords(prev);
+    setSelectedIdx(null);
+    persist(prev);
+  };
+
+  const redoEdit = () => {
+    if (redoStack.length === 0) return;
+    const next = redoStack[redoStack.length - 1];
+    setRedoStack((s) => s.slice(0, -1));
+    setUndoStack((s) => [...s, editedChords]);
+    setEditedChords(next);
+    setSelectedIdx(null);
+    persist(next);
+  };
+
+  const revertEdits = () => {
+    if (!window.confirm("Discard all your chord edits for this song?")) return;
+    setEditedChords(null);
+    setUndoStack([]);
+    setRedoStack([]);
+    setSelectedIdx(null);
+    persist(null);
+  };
+
+  // Delete removes the selected chord, typing a chord name starts renaming it,
+  // I or Insert inserts a chord at the playhead, Esc deselects, Ctrl/Cmd+Z
+  // undoes, Ctrl+Shift+Z or Ctrl+Y redoes — except while typing in a field.
+  // Held keys don't repeat edits. The listener reads the latest handlers
+  // through a ref so it only re-binds when editing toggles.
+  const onEditKey = (e: KeyboardEvent) => {
+    const el = e.target as HTMLElement | null;
+    if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT")) return;
+    const mod = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+    if (e.key === "Delete" && selectedIdx !== null) {
+      e.preventDefault();
+      if (!e.repeat) deleteSelected();
+    } else if (e.key === "Escape") {
+      setSelectedIdx(null);
+      setInsertAt(null);
+    } else if (!mod && !e.altKey && (key === "i" || e.key === "Insert")) {
+      e.preventDefault();
+      if (!e.repeat) startInsert();
+    } else if (mod && (key === "y" || (key === "z" && e.shiftKey))) {
+      e.preventDefault();
+      if (!e.repeat) redoEdit();
+    } else if (mod && key === "z") {
+      e.preventDefault();
+      if (!e.repeat) undoEdit();
+    } else if (!mod && !e.altKey && /^[a-gn]$/.test(key) && selectedIdx !== null) {
+      // Focus moves before the key's character is inserted, so it lands in
+      // the (select-all-on-focus) chord field and replaces its text.
+      chordInputRef.current?.focus();
+    }
+  };
+  const onEditKeyRef = useRef(onEditKey);
+  onEditKeyRef.current = onEditKey;
+  useEffect(() => {
+    if (!editing) return;
+    const onKey = (e: KeyboardEvent) => onEditKeyRef.current(e);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [editing]);
+
   // ---- Wavesurfer setup --------------------------------------------------
 
   // The wave container is rendered conditionally on `result`, so we must
@@ -208,6 +431,34 @@ export default function Home() {
   }, [file, result]);
 
   const togglePlay = () => waveSurferRef.current?.playPause();
+
+  // Space toggles play/pause anywhere except while typing in a field. Keyup is
+  // swallowed too, or a focused button (Play, Insert chord…) would also click.
+  useEffect(() => {
+    const isSpace = (e: KeyboardEvent) => {
+      if (e.code !== "Space" && e.key !== " ") return false;
+      const el = e.target as HTMLElement | null;
+      const typing = el && (
+        (el.tagName === "INPUT" && !["checkbox", "radio", "range", "button"].includes((el as HTMLInputElement).type)) ||
+        el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable
+      );
+      return !typing && !e.ctrlKey && !e.metaKey && !e.altKey;
+    };
+    const onDown = (e: KeyboardEvent) => {
+      if (!isSpace(e) || !waveSurferRef.current) return;
+      e.preventDefault();
+      if (!e.repeat) waveSurferRef.current.playPause();
+    };
+    const onUp = (e: KeyboardEvent) => {
+      if (isSpace(e) && waveSurferRef.current) e.preventDefault();
+    };
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup", onUp);
+    return () => {
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("keyup", onUp);
+    };
+  }, []);
   const seek = (time: number) => {
     if (waveSurferRef.current && result) {
       waveSurferRef.current.seekTo(time / result.duration);
@@ -223,7 +474,7 @@ export default function Home() {
       key: result.key,
       bpm: result.bpm,
       duration: result.duration,
-      chords: result.chords,
+      chords,
       beats: result.beats,
       lyrics: result.lyrics ?? null,
       semitones,
@@ -240,7 +491,7 @@ export default function Home() {
       key: result.key,
       bpm: result.bpm,
       duration: result.duration,
-      chords: result.chords,
+      chords,
       lyrics: result.lyrics ?? null,
       sections: result.sections ?? null,
       capo: capoSuggestion,
@@ -593,7 +844,10 @@ export default function Home() {
             </div>
             <div>
               <span style={{ color: "var(--muted)", fontSize: 12 }}>CHORDS </span>
-              <strong>{result.chords.filter((c) => c.label !== "N").length}</strong>
+              <strong>{chords.filter((c) => c.label !== "N").length}</strong>
+              {editedChords && (
+                <span style={{ color: "var(--accent)", fontSize: 12, marginLeft: 6 }}>✎ edited</span>
+              )}
             </div>
             {processingTimeSec !== null && (
               <div>
@@ -656,7 +910,7 @@ export default function Home() {
           >
             <div ref={waveContainerRef} style={{ marginBottom: 12 }} />
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <button onClick={togglePlay} style={{ minWidth: 80 }}>
+              <button onClick={togglePlay} title="Play/Pause (Space)" style={{ minWidth: 80 }}>
                 {isPlaying ? "Pause" : "Play"}
               </button>
               <span style={{ color: "var(--muted)", fontSize: 13, fontFamily: "monospace" }}>
@@ -694,13 +948,85 @@ export default function Home() {
             </div>
           </div>
 
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+            <button
+              onClick={() => { setEditing((e) => !e); setSelectedIdx(null); setInsertAt(null); }}
+              disabled={!editsReady}
+              style={editing ? { borderColor: "var(--accent)", color: "var(--accent-bright)" } : undefined}
+            >
+              {editing ? "Done editing" : "Edit chords"}
+            </button>
+            {editing && (
+              <>
+                <button
+                  onClick={startInsert}
+                  title="Insert a chord change at the playhead, snapped to the nearest beat (I)"
+                >
+                  Insert chord
+                </button>
+                <button onClick={undoEdit} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">
+                  Undo
+                </button>
+                <button onClick={redoEdit} disabled={redoStack.length === 0} title="Redo (Ctrl+Shift+Z)">
+                  Redo
+                </button>
+              </>
+            )}
+            {editedChords && (
+              <button onClick={revertEdits}>Revert to detected</button>
+            )}
+            <span style={{ color: saveFailed ? "#e06c75" : "var(--muted)", fontSize: 12 }}>
+              {saveFailed
+                ? "Couldn't save edits in this browser. They'll be lost when you reload."
+                : editing
+                  ? "Click a chord to rename or delete it. To add a missed change, put the playhead there and press Insert chord."
+                  : editedChords
+                    ? "Showing your edits. They're saved in this browser."
+                    : ""}
+            </span>
+          </div>
+
           <ChordTimeline
-            chords={result.chords}
+            chords={insertPreview?.chords ?? chords}
+            pendingIndex={insertPreview?.index ?? null}
             duration={result.duration}
             currentTime={currentTime}
             semitones={semitones}
             onSeek={seek}
+            editing={editing}
+            selectedIndex={selectedIdx}
+            onSelect={selectChord}
           />
+
+          {editing && insertPreview && (
+            <ChordEditBar
+              mode="insert"
+              chord={insertPreview.span}
+              insertNote={insertPreview.note}
+              onNudge={nudgeInsert}
+              canNudge={insertPreview.canNudge}
+              semitones={semitones}
+              quickPicks={quickPicks}
+              canDelete={false}
+              inputRef={chordInputRef}
+              onApply={applyInsert}
+              onDelete={() => {}}
+              onClose={() => setInsertAt(null)}
+            />
+          )}
+
+          {editing && !insertPreview && selectedIdx !== null && chords[selectedIdx] && (
+            <ChordEditBar
+              chord={chords[selectedIdx]}
+              semitones={semitones}
+              quickPicks={quickPicks}
+              canDelete={chords.length > 1}
+              inputRef={chordInputRef}
+              onApply={applyLabel}
+              onDelete={deleteSelected}
+              onClose={() => setSelectedIdx(null)}
+            />
+          )}
         </>
       )}
     </main>
@@ -711,4 +1037,8 @@ function formatTime(s: number): string {
   const m = Math.floor(s / 60);
   const sec = Math.floor(s - m * 60);
   return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+function formatTimeTenths(s: number): string {
+  return `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
 }

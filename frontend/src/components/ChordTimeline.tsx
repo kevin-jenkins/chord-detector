@@ -10,6 +10,12 @@ interface Props {
   currentTime: number;
   semitones: number;
   onSeek: (time: number) => void;
+  /** In edit mode, clicking a block selects it (and still seeks there). */
+  editing?: boolean;
+  selectedIndex?: number | null;
+  onSelect?: (index: number) => void;
+  /** Block that previews an insert still waiting for its chord. */
+  pendingIndex?: number | null;
 }
 
 /**
@@ -24,6 +30,10 @@ export default function ChordTimeline({
   currentTime,
   semitones,
   onSeek,
+  editing = false,
+  selectedIndex = null,
+  onSelect,
+  pendingIndex = null,
 }: Props) {
   const stripRef = useRef<HTMLDivElement>(null);
   const activeRef = useRef<HTMLDivElement>(null);
@@ -127,12 +137,17 @@ export default function ChordTimeline({
           const width = Math.max(48, Math.min(240, dur * 60));
           const isActive = i === activeIdx;
           const isSilent = c.label === "N";
+          const isSelected = editing && i === selectedIndex;
+          const isPending = i === pendingIndex;
 
           return (
             <div
-              key={i}
+              key={`${c.start}-${i}`}
               ref={isActive ? activeRef : null}
-              onClick={() => onSeek(c.start)}
+              onClick={() => {
+                onSeek(c.start);
+                if (editing) onSelect?.(i);
+              }}
               style={{
                 flex: `0 0 ${width}px`,
                 display: "flex",
@@ -141,9 +156,13 @@ export default function ChordTimeline({
                 alignItems: "center",
                 background: isActive ? "var(--chord-active)" : "var(--chord-bg)",
                 border: `1px solid ${isActive ? "var(--accent)" : "var(--border)"}`,
+                outline: isPending
+                  ? "2px dashed var(--accent-bright)"
+                  : isSelected ? "2px solid var(--accent-bright)" : "none",
+                outlineOffset: 1,
                 borderRadius: 6,
                 padding: "10px 8px",
-                cursor: "pointer",
+                cursor: editing ? "text" : "pointer",
                 opacity: isSilent ? 0.4 : 1,
                 transition: "background 0.15s, border-color 0.15s",
               }}
@@ -156,7 +175,7 @@ export default function ChordTimeline({
                   color: isActive ? "var(--accent-bright)" : "var(--text)",
                 }}
               >
-                {isSilent ? "—" : displayLabel(c.label)}
+                {isPending ? "?" : isSilent ? "—" : displayLabel(c.label)}
               </div>
               <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
                 {dur.toFixed(1)}s
