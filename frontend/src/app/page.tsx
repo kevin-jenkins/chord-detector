@@ -431,6 +431,34 @@ export default function Home() {
   }, [file, result]);
 
   const togglePlay = () => waveSurferRef.current?.playPause();
+
+  // Space toggles play/pause anywhere except while typing in a field. Keyup is
+  // swallowed too, or a focused button (Play, Insert chord…) would also click.
+  useEffect(() => {
+    const isSpace = (e: KeyboardEvent) => {
+      if (e.code !== "Space" && e.key !== " ") return false;
+      const el = e.target as HTMLElement | null;
+      const typing = el && (
+        (el.tagName === "INPUT" && !["checkbox", "radio", "range", "button"].includes((el as HTMLInputElement).type)) ||
+        el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable
+      );
+      return !typing && !e.ctrlKey && !e.metaKey && !e.altKey;
+    };
+    const onDown = (e: KeyboardEvent) => {
+      if (!isSpace(e) || !waveSurferRef.current) return;
+      e.preventDefault();
+      if (!e.repeat) waveSurferRef.current.playPause();
+    };
+    const onUp = (e: KeyboardEvent) => {
+      if (isSpace(e) && waveSurferRef.current) e.preventDefault();
+    };
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup", onUp);
+    return () => {
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("keyup", onUp);
+    };
+  }, []);
   const seek = (time: number) => {
     if (waveSurferRef.current && result) {
       waveSurferRef.current.seekTo(time / result.duration);
@@ -882,7 +910,7 @@ export default function Home() {
           >
             <div ref={waveContainerRef} style={{ marginBottom: 12 }} />
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <button onClick={togglePlay} style={{ minWidth: 80 }}>
+              <button onClick={togglePlay} title="Play/Pause (Space)" style={{ minWidth: 80 }}>
                 {isPlaying ? "Pause" : "Play"}
               </button>
               <span style={{ color: "var(--muted)", fontSize: 13, fontFamily: "monospace" }}>
